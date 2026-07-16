@@ -1,0 +1,6 @@
+{
+  "plugin_port": 2021,
+  "storage_path": "/home/user/mcp-onlyoffice/documents",
+  "desktop_path": "/opt/onlyoffice/desktopeditors/DesktopEditors",
+  "log_level": "info"
+}

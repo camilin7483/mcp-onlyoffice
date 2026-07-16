@@ -1,0 +1,30 @@
+# Compiled binary
+mcp-onlyoffice
+mcp-onlyoffice.exe
+
+# User data (document storage)
+documents/*.data
+documents/.metadata.json
+
+# Config
+config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+python_engine/__pycache__/
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.idea/
+.vscode/
+*.tmproj

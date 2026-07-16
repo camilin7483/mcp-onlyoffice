@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<script>
+let ws = null;
+let retryTimer = null;
+let portIndex = 0;
+const PORT_START = 2021;
+const PORT_SCAN_MAX = 5;
+
+function connect() {
+  if (ws && ws.readyState === WebSocket.OPEN) return;
+  if (ws) { ws.onclose = null; ws.onerror = null; ws.close(); ws = null; }
+
+  const port = PORT_START + portIndex;
+  const url = "ws://127.0.0.1:" + port + "/plugin";
+  ws = new WebSocket(url);
+  ws.onopen = () => {
+    console.log("[MCP] connected on port " + port);
+    portIndex = 0;
+  };
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      handleCommand(msg);
+    } catch (err) {
+      console.error("[MCP] parse error:", err);
+    }
+  };
+  ws.onclose = () => {
+    console.log("[MCP] disconnected from port " + port);
+    ws = null;
+    portIndex = (portIndex + 1) % PORT_SCAN_MAX;
+    setTimeout(connect, portIndex === 0 ? 5000 : 1000);
+  };
+  ws.onerror = () => {
+    ws && ws.close();
+  };
+}
+
+function sendResponse(id, result, error) {
+  const msg = { id, result, error };
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(msg));
+  }
+}
+
+function handleCommand(msg) {
+  const { id, method, params } = msg;
+  switch (method) {
+    case "ping":
+      sendResponse(id, "pong");
+      break;
+    case "get_selected_text":
+      execMethod("GetSelectedText", [], (res) => sendResponse(id, res));
+      break;
+    case "get_all_content":
+      execMethod("GetAllContent", [], (res) => sendResponse(id, res));
+      break;
+    case "insert_text":
+      execMethod("PasteText", [params.text || ""], () => sendResponse(id, "ok"));
+      break;
+    case "replace_text":
+      execMethod("GetAllContent", [], (content) => {
+        const newContent = content.replace(params.old || "", params.new || "");
+        execMethod("PasteText", [newContent], () => sendResponse(id, "ok"));
+      });
+      break;
+    case "create_table": {
+      const rows = params.rows || 3;
+      const cols = params.cols || 3;
+      runCommand((resolve) => {
+        const doc = Api.GetDocument();
+        const table = Api.CreateTable(rows, cols);
+        doc.InsertContent([table]);
+        resolve();
+      }, () => sendResponse(id, "ok"));
+      break;
+    }
+    case "create_list": {
+      const items = params.items || ["Item 1", "Item 2", "Item 3"];
+      const type = params.type || "bullet";
+      runCommand((resolve) => {
+        const doc = Api.GetDocument();
+        if (type === "numbered") {
+          const list = Api.CreateNumberedList("numbers");
+          for (const text of items) {
+            const para = Api.CreateParagraph();
+            para.AddText(text);
+            list.AddParagraph(para);
+          }
+          doc.InsertContent([list]);
+        } else {
+          const list = Api.CreateBulletList("bullet");
+          for (const text of items) {
+            const para = Api.CreateParagraph();
+            para.AddText(text);
+            list.AddParagraph(para);
+          }
+          doc.InsertContent([list]);
+        }
+        resolve();
+      }, () => sendResponse(id, "ok"));
+      break;
+    }
+    case "set_bold":
+      execMethod("SetBold", [params.value !== false], () => sendResponse(id, "ok"));
+      break;
+    case "set_italic":
+      execMethod("SetItalic", [params.value !== false], () => sendResponse(id, "ok"));
+      break;
+    case "get_document_info":
+      sendResponse(id, {
+        editorType: (window.Asc.plugin.info || {}).editorType || "unknown"
+      });
+      break;
+    default:
+      sendResponse(id, null, "unknown method: " + method);
+  }
+}
+
+function execMethod(name, args, cb) {
+  try {
+    Asc.plugin.executeMethod(name, args, cb || (() => {}));
+  } catch (err) {
+    console.error("[MCP] executeMethod error:", err);
+    if (cb) cb(null);
+  }
+}
+
+function runCommand(fn, cb) {
+  try {
+    Asc.plugin.callCommand("(" + fn.toString() + ")(function(){});", false, true, cb || (() => {}));
+  } catch (err) {
+    console.error("[MCP] callCommand error:", err);
+    if (cb) cb();
+  }
+}
+
+Asc.plugin.init = function () {
+  console.log("[MCP] plugin init");
+  connect();
+};
+
+Asc.plugin.onDocumentOpen = function () {
+  console.log("[MCP] document opened");
+};
+</script>
+</head>
+<body></body>
+</html>
