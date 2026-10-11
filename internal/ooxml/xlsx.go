@@ -1,9 +1,8 @@
 package ooxml
 
 import (
-	"archive/zip"
-	"bytes"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -14,19 +13,28 @@ const (
 	cellString cellType = iota
 	cellNumber
 	cellFormula
+	cellBool
 )
 
 func cellTypeOf(val string) (cellType, string) {
 	if strings.HasPrefix(val, "=") {
 		return cellFormula, val[1:]
 	}
-	if _, err := strconv.ParseFloat(val, 64); err == nil {
-		return cellNumber, val
+	if isBool(val) {
+		return cellBool, strings.ToLower(val)
 	}
-	if val == "true" || val == "false" || val == "TRUE" || val == "FALSE" {
+	if isNumeric(val) {
 		return cellNumber, val
 	}
 	return cellString, val
+}
+
+func isBool(s string) bool {
+	switch s {
+	case "true", "false", "TRUE", "FALSE":
+		return true
+	}
+	return false
 }
 
 func CreateXLSX(title string) ([]byte, error) {
@@ -34,12 +42,11 @@ func CreateXLSX(title string) ([]byte, error) {
 }
 
 func CreateXLSXFromData(title string, headers []string, rows [][]string) ([]byte, error) {
-	var buf bytes.Buffer
-	w := zip.NewWriter(&buf)
+	title = sanitizeSheetName(title)
 
 	sharedStrings := collectSharedStrings(headers, rows)
 	sheetXML := buildSheetXML(headers, rows, sharedStrings)
-	sharedStringsXML := buildSharedStringsXML(sharedStrings)
+	sharedStringsXML := buildSharedStringsXML(sharedStrings, countSharedStringUses(headers, rows))
 
 	files := map[string]string{
 		"[Content_Types].xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -50,11 +57,10 @@ func CreateXLSXFromData(title string, headers []string, rows [][]string) ([]byte
   <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
   <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
   <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
-</Types>`,
-		"_rels/.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
-</Relationships>`,
+` + docPropsContentTypes() + `</Types>`,
+		"_rels/.rels":       packageRels("xl/workbook.xml"),
+		"docProps/core.xml": docPropsCore(title),
+		"docProps/app.xml":  docPropsApp(),
 		"xl/_rels/workbook.xml.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
@@ -89,28 +95,15 @@ func CreateXLSXFromData(title string, headers []string, rows [][]string) ([]byte
 		"xl/sharedStrings.xml": sharedStringsXML,
 	}
 
-	for name, content := range files {
-		f, err := w.Create(name)
-		if err != nil {
-			return nil, fmt.Errorf("create %s: %w", name, err)
-		}
-		if _, err := f.Write([]byte(content)); err != nil {
-			return nil, fmt.Errorf("write %s: %w", name, err)
-		}
-	}
-
-	if err := w.Close(); err != nil {
-		return nil, fmt.Errorf("close zip: %w", err)
-	}
-
-	return buf.Bytes(), nil
+	return writeZipOrdered(files)
 }
 
 func collectSharedStrings(headers []string, rows [][]string) []string {
 	seen := map[string]int{}
 	var list []string
 	add := func(s string) {
-		if _, ok := seen[s]; !ok && !isNumeric(s) && !strings.HasPrefix(s, "=") {
+		// Headers are always labels, even when numeric ("2024").
+		if _, ok := seen[s]; !ok {
 			seen[s] = len(list)
 			list = append(list, s)
 		}
@@ -120,22 +113,49 @@ func collectSharedStrings(headers []string, rows [][]string) []string {
 	}
 	for _, row := range rows {
 		for _, cell := range row {
+			if cell == "" || strings.HasPrefix(cell, "=") || isBool(cell) || isNumeric(cell) {
+				continue
+			}
 			add(cell)
 		}
 	}
 	return list
 }
 
+// countSharedStringUses returns total string-cell occurrences (duplicates
+// counted each time); uniqueCount is len(collectSharedStrings(...)).
+func countSharedStringUses(headers []string, rows [][]string) int {
+	total := len(headers) // headers are always shared strings
+	for _, row := range rows {
+		for _, cell := range row {
+			if cell == "" || strings.HasPrefix(cell, "=") || isBool(cell) || isNumeric(cell) {
+				continue
+			}
+			total++
+		}
+	}
+	return total
+}
+
 func isNumeric(s string) bool {
-	_, err := strconv.ParseFloat(s, 64)
-	return err == nil || s == "true" || s == "false" || s == "TRUE" || s == "FALSE"
+	if s == "" {
+		return false
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return false
+	}
+	// NaN/Inf are not valid spreadsheet numbers; store as text.
+	return !math.IsNaN(f) && !math.IsInf(f, 0)
 }
 
 func buildSheetXML(headers []string, rows [][]string, sharedStrings []string) string {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <sheetData>
+`)
+	b.WriteString("  " + sheetDimension(headers, rows) + "\n")
+	b.WriteString(`  <sheetData>
 `)
 	ssIndex := func(s string) int {
 		for i, v := range sharedStrings {
@@ -143,7 +163,7 @@ func buildSheetXML(headers []string, rows [][]string, sharedStrings []string) st
 				return i
 			}
 		}
-		return 0
+		return -1
 	}
 
 	writeCell := func(ref, val string, isHeader bool) {
@@ -154,22 +174,35 @@ func buildSheetXML(headers []string, rows [][]string, sharedStrings []string) st
 		if isHeader {
 			style = ` s="1"`
 		}
+		// Headers are labels: always shared strings.
+		if isHeader {
+			if si := ssIndex(val); si >= 0 {
+				b.WriteString(fmt.Sprintf("      <c r=\"%s\" t=\"s\"%s><v>%d</v></c>\n", ref, style, si))
+			} else {
+				b.WriteString(fmt.Sprintf("      <c r=\"%s\" t=\"inlineStr\"%s><is><t>%s</t></is></c>\n", ref, style, xmlEscape(val)))
+			}
+			return
+		}
 		if strings.HasPrefix(val, "=") {
-			formula := val[1:]
-			if isHeader {
-				b.WriteString(fmt.Sprintf("      <c r=\"%s\"%s><f>%s</f></c>\n", ref, style, xmlEscape(formula)))
-			} else {
-				b.WriteString(fmt.Sprintf("      <c r=\"%s\"><f>%s</f></c>\n", ref, xmlEscape(formula)))
+			b.WriteString(fmt.Sprintf("      <c r=\"%s\"><f>%s</f><v>0</v></c>\n", ref, xmlEscape(val[1:])))
+			return
+		}
+		if isBool(val) {
+			v := "0"
+			if strings.EqualFold(val, "true") {
+				v = "1"
 			}
-		} else if isNumeric(val) {
-			if !isHeader {
-				b.WriteString(fmt.Sprintf("      <c r=\"%s\" s=\"2\"><v>%s</v></c>\n", ref, val))
-			} else {
-				b.WriteString(fmt.Sprintf("      <c r=\"%s\" t=\"s\"%s><v>%d</v></c>\n", ref, style, ssIndex(val)))
-			}
+			b.WriteString(fmt.Sprintf("      <c r=\"%s\" t=\"b\"><v>%s</v></c>\n", ref, v))
+			return
+		}
+		if isNumeric(val) {
+			b.WriteString(fmt.Sprintf("      <c r=\"%s\"><v>%s</v></c>\n", ref, val))
+			return
+		}
+		if si := ssIndex(val); si >= 0 {
+			b.WriteString(fmt.Sprintf("      <c r=\"%s\" t=\"s\"><v>%d</v></c>\n", ref, si))
 		} else {
-			si := ssIndex(val)
-			b.WriteString(fmt.Sprintf("      <c r=\"%s\" t=\"s\"%s><v>%d</v></c>\n", ref, style, si))
+			b.WriteString(fmt.Sprintf("      <c r=\"%s\" t=\"inlineStr\"><is><t>%s</t></is></c>\n", ref, xmlEscape(val)))
 		}
 	}
 
@@ -198,11 +231,28 @@ func buildSheetXML(headers []string, rows [][]string, sharedStrings []string) st
 	return b.String()
 }
 
-func buildSharedStringsXML(ss []string) string {
+func sheetDimension(headers []string, rows [][]string) string {
+	maxCols := len(headers)
+	for _, row := range rows {
+		if len(row) > maxCols {
+			maxCols = len(row)
+		}
+	}
+	totalRows := len(rows)
+	if len(headers) > 0 {
+		totalRows++
+	}
+	if maxCols == 0 || totalRows == 0 {
+		return `<dimension ref="A1"/>`
+	}
+	return fmt.Sprintf(`<dimension ref="A1:%s%d"/>`, colName(maxCols-1), totalRows)
+}
+
+func buildSharedStringsXML(ss []string, total int) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="%d" uniqueCount="%d">
-`, len(ss), len(ss)))
+`, total, len(ss)))
 	for _, s := range ss {
 		b.WriteString(fmt.Sprintf("  <si><t>%s</t></si>\n", xmlEscape(s)))
 	}

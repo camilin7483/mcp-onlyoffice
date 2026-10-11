@@ -133,6 +133,16 @@ func (e *Engine) registerBuiltins() {
 			},
 		},
 	})
+	e.Register(&WorkflowDef{
+		Name:        "batch_create",
+		Description: "Create multiple DOCX documents at once from a list of {title, content} items",
+		Steps: []StepDef{
+			{
+				Name: "create_batch",
+				Run:  e.stepBatchCreate,
+			},
+		},
+	})
 }
 
 func (e *Engine) stepGenerateDocx(ctx context.Context, params map[string]any, results map[string]any) (any, error) {
@@ -273,6 +283,44 @@ func (e *Engine) stepLinkDocuments(ctx context.Context, params map[string]any, r
 	}
 
 	return map[string]any{"linked_documents": len(ids), "cross_references": linked}, nil
+}
+
+// stepBatchCreate creates one DOCX per item in params["items"] ({title, content}).
+func (e *Engine) stepBatchCreate(ctx context.Context, params map[string]any, results map[string]any) (any, error) {
+	raw, _ := params["items"].([]any)
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("batch_create: params.items is required (non-empty list of {title, content})")
+	}
+	var created []map[string]any
+	var failed []string
+	for i, ri := range raw {
+		item, _ := ri.(map[string]any)
+		if item == nil {
+			failed = append(failed, fmt.Sprintf("item_%d: not an object", i))
+			continue
+		}
+		title, _ := item["title"].(string)
+		if title == "" {
+			title = fmt.Sprintf("Batch Document %d", i+1)
+		}
+		content, _ := item["content"].(string)
+		data, err := ooxml.CreateDOCXFromText(title, content)
+		if err != nil {
+			failed = append(failed, fmt.Sprintf("%s: %v", title, err))
+			continue
+		}
+		doc, err := e.store.Create(sanitize(title)+".docx", data)
+		if err != nil {
+			failed = append(failed, fmt.Sprintf("%s: %v", title, err))
+			continue
+		}
+		created = append(created, map[string]any{"id": doc.ID, "filename": doc.Filename, "size": doc.Size})
+	}
+	out := map[string]any{"created": created, "count": len(created)}
+	if len(failed) > 0 {
+		out["failed"] = failed
+	}
+	return out, nil
 }
 
 func sanitize(name string) string {

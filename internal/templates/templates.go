@@ -14,6 +14,103 @@ type Template struct {
 	Render      func(params map[string]any) (*agent.AgentTask, error)
 }
 
+// Corporate business pack: palette and style names shared with the native
+// DOCX builder (internal/ooxml) and the Python engine. The Go agent renders
+// sections as body content; real header/footer parts and the TOC field are
+// emitted by ooxml.CreateCorporateReport and python documents.create_report
+// (see CorporateMeta), which consume the same params.
+// ponytail: header/footer/page-size travel as template params + meta, not as
+// body sections, so they never pollute the document body.
+const (
+	CorporateBlueDark  = "1F4E79"
+	CorporateBlue      = "2E75B6"
+	CorporateBlueLight = "D9E2F3"
+)
+
+const (
+	CorporateStyleNormal   = "Normal"
+	CorporateStyleHeading1 = "Heading1"
+	CorporateStyleHeading2 = "Heading2"
+	CorporateStyleHeading3 = "Heading3"
+	CorporateStyleQuote    = "Quote"
+)
+
+// CorporatePageSize validates the page_size param ("letter" default, "A4").
+func CorporatePageSize(params map[string]any) string {
+	if s, ok := params["page_size"].(string); ok && (s == "A4" || s == "a4") {
+		return "A4"
+	}
+	return "letter"
+}
+
+// CorporateMeta extracts the corporate pack hints (header/footer/page size,
+// palette) for presenters that emit real DOCX parts.
+func CorporateMeta(title string, params map[string]any) map[string]string {
+	header := getStr(params, "header", "")
+	if header == "" {
+		header = title
+	}
+	return map[string]string{
+		"header":     header,
+		"footer":     getStr(params, "footer", ""),
+		"page_size":  CorporatePageSize(params),
+		"accent":     CorporateBlue,
+		"accentDark": CorporateBlueDark,
+	}
+}
+
+// CorporateCoverSection builds the cover block: title, subtitle, date.
+func CorporateCoverSection(title, subtitle, date, author string) agent.Section {
+	lines := []string{title}
+	if subtitle != "" {
+		lines = append(lines, subtitle)
+	}
+	if date != "" {
+		lines = append(lines, date)
+	}
+	if author != "" {
+		lines = append(lines, "Prepared by: "+author)
+	}
+	return agent.Section{Type: agent.SectionText, Content: strings.Join(lines, "\n")}
+}
+
+// CorporateTOCSection is the TOC placeholder; Word fills the field on update.
+func CorporateTOCSection() agent.Section {
+	return agent.Section{
+		Type:    agent.SectionText,
+		Heading: "Table of Contents",
+		Content: "TOC field placeholder — update the table of contents field in Word to generate entries from Heading1-3.",
+	}
+}
+
+// CorporateHeaderText resolves the running header (defaults to the title).
+func CorporateHeaderText(title string, params map[string]any) string {
+	if h := getStr(params, "header", ""); h != "" {
+		return h
+	}
+	return title
+}
+
+// CorporateFooterText resolves the footer; page numbering is emitted as a
+// PAGE field by the DOCX presenters, so the text stays numbering-free.
+func CorporateFooterText(params map[string]any) string {
+	return getStr(params, "footer", "")
+}
+
+// CorporateStyleForLevel maps a 1-based depth to Heading1-3 (else Normal).
+func CorporateStyleForLevel(level int) string {
+	switch level {
+	case 1:
+		return CorporateStyleHeading1
+	case 2:
+		return CorporateStyleHeading2
+	case 3:
+		return CorporateStyleHeading3
+	default:
+		return CorporateStyleNormal
+	}
+}
+
 var registry []Template
 
 func Register(t Template) {
@@ -47,14 +144,23 @@ func init() {
 		Description: "Business report with executive summary, analysis, and recommendations",
 		Render: func(params map[string]any) (*agent.AgentTask, error) {
 			title := getStr(params, "title", "Business Report")
+			subtitle := getStr(params, "subtitle", "")
+			date := getStr(params, "date", time.Now().Format("January 2, 2006"))
 			author := getStr(params, "author", "")
 			summary := getStr(params, "summary", "")
 			recommendations := getStr(params, "recommendations", "")
+			includeTOC := getBool(params, "include_toc", true)
 
 			sections := []agent.Section{
-				{Type: agent.SectionText, Heading: "Executive Summary", Content: summary},
-				{Type: agent.SectionText, Heading: "Analysis", Content: getStr(params, "analysis", "Analysis content pending.")},
+				CorporateCoverSection(title, subtitle, date, author),
 			}
+			if includeTOC {
+				sections = append(sections, CorporateTOCSection())
+			}
+			sections = append(sections,
+				agent.Section{Type: agent.SectionText, Heading: "Executive Summary", Content: summary},
+				agent.Section{Type: agent.SectionText, Heading: "Analysis", Content: getStr(params, "analysis", "Analysis content pending.")},
+			)
 
 			if headers, rows, ok := extractTable(params, "data_table"); ok {
 				sections = append(sections, agent.Section{
@@ -64,14 +170,7 @@ func init() {
 
 			sections = append(sections, agent.Section{Type: agent.SectionText, Heading: "Recommendations", Content: recommendations})
 
-			if author != "" {
-				sections = append(sections, agent.Section{
-					Type: agent.SectionText, Heading: "Prepared by",
-					Content: fmt.Sprintf("%s — %s", author, time.Now().Format("January 2, 2006")),
-				})
-			}
-
-			return &agent.AgentTask{Task: "create_report", Title: title, Sections: sections}, nil
+			return &agent.AgentTask{Task: "create_report", Template: "business_report", Title: title, Sections: sections}, nil
 		},
 	})
 
@@ -163,6 +262,13 @@ func init() {
 
 func getStr(params map[string]any, key, def string) string {
 	if v, ok := params[key].(string); ok {
+		return v
+	}
+	return def
+}
+
+func getBool(params map[string]any, key string, def bool) bool {
+	if v, ok := params[key].(bool); ok {
 		return v
 	}
 	return def

@@ -37,6 +37,9 @@ func (c *Config) ApplyEnv() {
 	if v := os.Getenv("MCP_ONLYOFFICE_DESKTOP_PATH"); v != "" {
 		c.DesktopPath = v
 	}
+	if v := os.Getenv("MCP_ONLYOFFICE_LOG_LEVEL"); v != "" {
+		c.LogLevel = v
+	}
 }
 
 func Load(path string) (*Config, error) {

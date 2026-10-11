@@ -1,6 +1,8 @@
 package planner
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -136,6 +138,51 @@ func TestCreatePlan(t *testing.T) {
 	}
 }
 
+func TestCreatePlanBatch(t *testing.T) {
+	p := New()
+	p.RegisterCapabilities([]Capability{
+		{Name: "excel.create_workbook", Description: "Create workbook"},
+		{Name: "documents.create_report", Description: "Create report"},
+	})
+
+	plan, err := p.CreatePlan(nil, "convert all files in batch", map[string]any{})
+	if err != nil {
+		t.Fatalf("CreatePlan batch failed: %v", err)
+	}
+	if len(plan.Steps) == 0 {
+		t.Fatal("expected batch fallback steps, got none")
+	}
+}
+
+func TestExecutePlanRecovery(t *testing.T) {
+	p := New()
+	p.RegisterCapabilities([]Capability{
+		{Name: "charts.bar_chart", Description: "Bar chart"},
+		{Name: "charts.line_chart", Description: "Line chart"},
+	})
+
+	plan := &Plan{
+		Objective: "chart test",
+		Intent:    Intent{Primary: IntentCreateChart},
+		Steps:     []PlanStep{{StepID: "step_01", Capability: "charts.bar_chart", Params: map[string]any{}}},
+	}
+
+	calls := 0
+	res := p.ExecutePlan(nil, plan, func(ctx context.Context, cap string, params map[string]any) (any, error) {
+		calls++
+		if cap == "charts.bar_chart" {
+			return nil, errors.New("boom")
+		}
+		return map[string]any{"ok": true}, nil
+	})
+	if res.Status != "ok" {
+		t.Fatalf("expected recovery to succeed, got %q (%+v)", res.Status, res.Steps)
+	}
+	if calls != 2 {
+		t.Errorf("expected 2 calls (fail + alternative retry), got %d", calls)
+	}
+}
+
 func BenchmarkAnalyzeIntent(b *testing.B) {
 	objectives := []string{
 		"Create a spreadsheet with sales data and a chart",
@@ -243,4 +290,152 @@ func TestSuggestImprovements(t *testing.T) {
 	if len(suggestions) == 0 {
 		t.Error("expected suggestions for repeated failures")
 	}
+}
+
+func reportPlanner() *Planner {
+	p := New()
+	p.RegisterCapabilities([]Capability{
+		{Name: "excel.create_workbook", Description: "Create workbook"},
+		{Name: "charts.bar_chart", Description: "Bar chart"},
+		{Name: "documents.create_report", Description: "Create report"},
+	})
+	return p
+}
+
+func reportParams() map[string]any {
+	return map[string]any{
+		"filename":   "/tmp/report-data.xlsx",
+		"sheet":      "Data",
+		"categories": []string{"Jan", "Feb"},
+		"values":     []float64{10, 20},
+		"path":       "/tmp/monthly-report.docx",
+		"title":      "Monthly Report",
+	}
+}
+
+func TestExpandReportMapsParamsPerStep(t *testing.T) {
+	p := reportPlanner()
+	plan, err := p.CreatePlan(context.Background(), "generate monthly report for sales Q1", reportParams())
+	if err != nil {
+		t.Fatalf("CreatePlan: %v", err)
+	}
+	if len(plan.Steps) != 3 {
+		t.Fatalf("expected 3 steps, got %d", len(plan.Steps))
+	}
+	wb, ch, rep := plan.Steps[0], plan.Steps[1], plan.Steps[2]
+	if wb.Capability != "excel.create_workbook" || ch.Capability != "charts.bar_chart" || rep.Capability != "documents.create_report" {
+		t.Fatalf("unexpected chain: %v %v %v", wb.Capability, ch.Capability, rep.Capability)
+	}
+	if wb.Params["filename"] != "/tmp/report-data.xlsx" || wb.Params["sheet"] != "Data" {
+		t.Errorf("workbook params = %v, want filename+sheet only", wb.Params)
+	}
+	if _, ok := wb.Params["values"]; ok {
+		t.Errorf("workbook params must not contain chart keys: %v", wb.Params)
+	}
+	if _, ok := ch.Params["categories"]; !ok {
+		t.Errorf("chart params missing categories: %v", ch.Params)
+	}
+	if _, ok := ch.Params["values"]; !ok {
+		t.Errorf("chart params missing values: %v", ch.Params)
+	}
+	if _, ok := ch.Params["filename"]; ok {
+		t.Errorf("chart params must not contain filename: %v", ch.Params)
+	}
+	if rep.Params["path"] != "/tmp/monthly-report.docx" || rep.Params["title"] != "Monthly Report" {
+		t.Errorf("report params = %v, want path+title", rep.Params)
+	}
+}
+
+func TestExpandReportMissingParamActionable(t *testing.T) {
+	p := reportPlanner()
+	params := reportParams()
+	delete(params, "values")
+	_, err := p.CreatePlan(context.Background(), "generate monthly report missing values Q2", params)
+	if err == nil {
+		t.Fatal("expected actionable error for missing values")
+	}
+	if !contains(err.Error(), "values") || !contains(err.Error(), "charts.bar_chart") {
+		t.Errorf("error should name param and capability, got: %v", err)
+	}
+}
+
+func TestExpandReportMissingCapability(t *testing.T) {
+	p := New()
+	p.RegisterCapabilities([]Capability{
+		{Name: "excel.create_workbook", Description: "Create workbook"},
+		{Name: "documents.create_report", Description: "Create report"},
+	})
+	_, err := p.CreatePlan(context.Background(), "generate monthly report no charts Q3", reportParams())
+	if err == nil {
+		t.Fatal("expected error for unavailable charts.bar_chart")
+	}
+	if !contains(err.Error(), "charts.bar_chart") {
+		t.Errorf("error should name missing capability, got: %v", err)
+	}
+}
+
+func TestExpandDashboardStripsPreferSingleCall(t *testing.T) {
+	p := New()
+	p.RegisterCapabilities([]Capability{
+		{Name: "excel.kpi_sheet", Description: "KPI sheet"},
+		{Name: "analytics.statistics", Description: "Statistics"},
+	})
+
+	single, err := p.CreatePlan(context.Background(), "build kpi dashboard single execs", map[string]any{
+		"prefer_single_call": true, "kpis": []string{"revenue"},
+	})
+	if err != nil {
+		t.Fatalf("CreatePlan single: %v", err)
+	}
+	for _, s := range single.Steps {
+		if _, ok := s.Params["prefer_single_call"]; ok {
+			t.Errorf("step %s leaked prefer_single_call: %v", s.StepID, s.Params)
+		}
+	}
+
+	multi, err := p.CreatePlan(context.Background(), "build kpi dashboard multi execs", map[string]any{
+		"prefer_single_call": true, "kpis": []string{"revenue"},
+	})
+	_ = multi
+	// Force multi-step path directly.
+	steps := p.expandDashboard(nil, map[string]any{"kpis": []string{"revenue"}})
+	for _, s := range steps {
+		if _, ok := s.Params["prefer_single_call"]; ok {
+			t.Errorf("multi step %s leaked prefer_single_call", s.StepID)
+		}
+	}
+}
+
+func TestPlanCacheDeepCopyAndNormalize(t *testing.T) {
+	c := NewPlanCache()
+	plan := &Plan{
+		Objective: "Case Test",
+		Intent:    Intent{Primary: IntentCreateDocument},
+		Steps: []PlanStep{
+			{StepID: "step_01", Capability: "documents.create_report", Params: map[string]any{"title": "A"}},
+		},
+	}
+	c.Store("  Cache Normalize KEY", plan)
+	a := c.Lookup("cache normalize key")
+	b := c.Lookup("CACHE   NORMALIZE key")
+	if a == nil || b == nil {
+		t.Fatal("expected case/space-insensitive cache hit")
+	}
+	a.Steps[0].Capability = "MUTATED"
+	a.Steps[0].Params["title"] = "MUTATED"
+	c2 := c.Lookup("cache normalize key")
+	if c2.Steps[0].Capability == "MUTATED" || c2.Steps[0].Params["title"] == "MUTATED" {
+		t.Error("Lookup must return a deep copy, shared pointer detected")
+	}
+}
+
+func contains(s, sub string) bool {
+	return len(s) >= len(sub) && (func() bool {
+		for i := 0; i+len(sub) <= len(s); i++ {
+			if s[i:i+len(sub)] == sub {
+				return true
+			}
+		}
+		return false
+	})()
 }

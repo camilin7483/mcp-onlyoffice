@@ -3,7 +3,10 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -17,6 +20,15 @@ func textResult(text string) *mcp.CallToolResult {
 func textError(text string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: text}},
+		IsError: true,
+	}
+}
+
+// jsonError returns a consistent JSON error envelope: {"status":"error","error":msg}.
+func jsonError(msg string) *mcp.CallToolResult {
+	b, _ := json.Marshal(map[string]any{"status": "error", "error": msg})
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: string(b)}},
 		IsError: true,
 	}
 }
@@ -159,4 +171,24 @@ func joinErrors(errs []string) string {
 		return errs[0]
 	}
 	return fmt.Sprintf("[%d] %s", len(errs), strings.Join(errs, "; "))
+}
+
+// audit appends one JSONL line per tool outcome; best-effort, never fails the caller.
+func audit(tool, status, detail string) {
+	if len(detail) > 200 {
+		detail = detail[:197] + "..."
+	}
+	line, _ := json.Marshal(map[string]any{
+		"tool": tool, "status": status, "detail": detail,
+		"time": time.Now().UTC().Format(time.RFC3339),
+	})
+	if len(line) == 0 {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(os.TempDir(), "mcp-onlyoffice-audit.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintln(f, string(line))
 }

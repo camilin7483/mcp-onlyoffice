@@ -14,8 +14,8 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import BarChart, LineChart, PieChart, Reference
-from openpyxl.worksheet.table import Table
-from openpyxl.formatting.rule import CellIsRule
+from openpyxl.worksheet.table import Table, TableStyleInfo
+from openpyxl.formatting.rule import CellIsRule, ColorScaleRule
 import os
 import json
 
@@ -23,14 +23,75 @@ import json
 class ExcelEngine:
     """Reusable Excel capabilities. NOT a tool — a library."""
 
-    def create_workbook(self, filename: str = None, sheet_name: str = "Sheet1") -> dict:
-        """Create a new Excel workbook with one sheet."""
+    def create_workbook(self, filename: str = None, sheet_name: str = "Sheet1",
+                        title: str = None, headers: list = None,
+                        rows: list = None, kpis: list = None) -> dict:
+        """Create a new Excel workbook with cover, data and KPI sheets.
+
+        Without extras it keeps the legacy single-sheet behavior.
+        With title/headers/rows/kpis it builds: Cover (title) + data
+        sheet (headers/rows, styled, frozen, filtered) + KPI sheet.
+        """
         wb = Workbook()
         ws = wb.active
         ws.title = sheet_name
+        sheets = [sheet_name]
+        if title or headers or rows:
+            cover = wb.create_sheet(title="Cover", index=0)
+            cover["A1"] = title or sheet_name
+            cover["A1"].font = Font(size=18, bold=True, color="FFFFFF")
+            cover["A1"].fill = PatternFill(
+                start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+            cover["A1"].alignment = Alignment(horizontal="center", vertical="center")
+            cover.merge_cells("A1:D1")
+            cover.row_dimensions[1].height = 35
+            cover.column_dimensions["A"].width = 30
+            sheets = ["Cover"] + sheets
+            if headers or rows:
+                self._style_data_sheet(ws, headers or [], rows or [])
+        if kpis:
+            wb.create_sheet(title="KPI")
+            sheets = sheets + ["KPI"] if "KPI" not in sheets else sheets
+            kws = wb["KPI"]
+            for ci, h in enumerate(["KPI", "Value", "Target"], start=1):
+                cell = kws.cell(row=1, column=ci, value=h)
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill(
+                    start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+            for ri, kpi in enumerate(kpis, start=2):
+                kws.cell(row=ri, column=1, value=kpi.get("name"))
+                kws.cell(row=ri, column=2, value=kpi.get("value"))
+                kws.cell(row=ri, column=3, value=kpi.get("target"))
         if filename:
             wb.save(filename)
-        return {"path": filename, "sheet_name": sheet_name, "sheets": [sheet_name]}
+        wb.close()
+        return {"path": filename, "sheet_name": sheet_name, "sheets": wb.sheetnames if filename is None else sheets}
+
+    @staticmethod
+    def _style_data_sheet(ws, headers: list, rows: list) -> None:
+        """Write headers/rows with header style, widths, freeze and filter."""
+        for ci, h in enumerate(headers, start=1):
+            cell = ws.cell(row=1, column=ci, value=h)
+            cell.font = Font(bold=True, color="FFFFFF", size=11)
+            cell.fill = PatternFill(
+                start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        for ri, row in enumerate(rows, start=2):
+            for ci, val in enumerate(row, start=1):
+                ws.cell(row=ri, column=ci, value=val)
+        for col_cells in ws.columns:
+            max_len = 0
+            letter = None
+            for cell in col_cells:
+                if letter is None:
+                    letter = get_column_letter(cell.column)
+                if cell.value is not None:
+                    max_len = max(max_len, len(str(cell.value)))
+            if letter:
+                ws.column_dimensions[letter].width = min(max_len + 3, 50)
+        if headers:
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
 
     def open_workbook(self, path: str) -> dict:
         """Open an existing workbook and return its structure."""
@@ -102,17 +163,44 @@ class ExcelEngine:
 
     def insert_data(self, path: str, sheet_name: str = None,
                     headers: list = None, rows: list = None,
-                    start_row: int = 1, start_col: int = 1) -> dict:
-        """Insert headers and row data into a sheet."""
+                    start_row: int = 1, start_col: int = 1,
+                    auto_width: bool = True, freeze: bool = True,
+                    auto_filter: bool = True) -> dict:
+        """Insert headers and row data into a sheet.
+
+        Applies column widths, freeze panes and auto-filter by default.
+        """
         wb = load_workbook(path)
         ws = wb[sheet_name] if sheet_name else wb.active
         if headers:
             for ci, h in enumerate(headers, start=start_col):
-                ws.cell(row=start_row, column=ci, value=h)
+                cell = ws.cell(row=start_row, column=ci, value=h)
+                cell.font = Font(bold=True, color="FFFFFF", size=11)
+                cell.fill = PatternFill(
+                    start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+                cell.alignment = Alignment(horizontal="center", vertical="center")
             start_row += 1
         for ri, row in enumerate(rows or [], start=start_row):
             for ci, val in enumerate(row, start=start_col):
                 ws.cell(row=ri, column=ci, value=val)
+        if auto_width:
+            for col_cells in ws.columns:
+                max_len = 0
+                letter = None
+                for cell in col_cells:
+                    if letter is None:
+                        letter = get_column_letter(cell.column)
+                    if cell.value is not None:
+                        max_len = max(max_len, len(str(cell.value)))
+                if letter:
+                    ws.column_dimensions[letter].width = min(max_len + 3, 50)
+        if freeze and headers:
+            ws.freeze_panes = ws.cell(row=start_row, column=start_col).coordinate
+        if auto_filter and headers:
+            end_col = get_column_letter(start_col + len(headers) - 1)
+            end_row = start_row + len(rows or []) - 1
+            ws.auto_filter.ref = (
+                f"{get_column_letter(start_col)}{start_row - 1}:{end_col}{max(end_row, start_row - 1)}")
         wb.save(path)
         wb.close()
         return {"path": path, "rows_inserted": len(rows or [])}
@@ -146,6 +234,9 @@ class ExcelEngine:
             ncols = len(headers)
             ref = f"A1:{get_column_letter(ncols)}{nrows}"
             tab = Table(displayName=table_name, ref=ref)
+            tab.tableStyleInfo = TableStyleInfo(
+                name="TableStyleMedium9", showFirstColumn=False,
+                showLastColumn=False, showRowStripes=True, showColumnStripes=False)
             ws.add_table(tab)
 
         wb.save(path)
@@ -665,6 +756,73 @@ class ExcelEngine:
         wb.save(path)
         wb.close()
         return {"path": path, "kpis": len(kpis or [])}
+
+    def insert_formulas(self, path: str, sheet_name: str = None,
+                        formulas: list = None) -> dict:
+        """Insert multiple formulas at once.
+
+        Args:
+            formulas: list of {"cell": "B10", "formula": "=SUM(B2:B9)"}.
+                A leading "=" is added when missing.
+        """
+        wb = load_workbook(path)
+        ws = wb[sheet_name] if sheet_name else wb.active
+        applied = 0
+        for item in formulas or []:
+            cell = item.get("cell")
+            formula = item.get("formula")
+            if not cell or formula is None:
+                continue
+            formula = str(formula)
+            if not formula.startswith("="):
+                formula = "=" + formula
+            ws[cell] = formula
+            applied += 1
+        wb.save(path)
+        wb.close()
+        return {"path": path, "formulas_applied": applied}
+
+    def conditional_format(self, path: str, sheet_name: str = None,
+                           range_string: str = None, operator: str = "greaterThan",
+                           formula: str = "0", fill: str = "FFC7CE",
+                           font_color: str = "9C0006",
+                           min_color: str = "2E75B6",
+                           mid_color: str = "FFFFFF",
+                           max_color: str = "ED7D31") -> dict:
+        """Apply conditional formatting to a range.
+
+        operator="colorScale" applies a 3-point color scale (brand
+        palette); any other operator uses a CellIsRule threshold.
+
+        Args:
+            range_string: e.g. "B2:B20".
+            operator: CellIsRule operator (greaterThan, lessThan,
+                equal, notEqual, between, ...) or "colorScale".
+            formula: threshold value(s); a list enables "between".
+            fill/font_color: hex colors without "#".
+            min_color/mid_color/max_color: hex colors for the scale.
+        """
+        wb = load_workbook(path)
+        ws = wb[sheet_name] if sheet_name else wb.active
+        if operator == "colorScale":
+            ws.conditional_formatting.add(
+                range_string,
+                ColorScaleRule(start_type="min", start_color=min_color,
+                               mid_type="percentile", mid_value=50, mid_color=mid_color,
+                               end_type="max", end_color=max_color),
+            )
+        else:
+            dxf_fill = PatternFill(start_color=fill, end_color=fill, fill_type="solid")
+            dxf_font = Font(color=font_color)
+            values = formula if isinstance(formula, list) else [formula]
+            ws.conditional_formatting.add(
+                range_string,
+                CellIsRule(operator=operator, formula=[str(v) for v in values],
+                           fill=dxf_fill, font=dxf_font),
+            )
+        wb.save(path)
+        wb.close()
+        return {"path": path, "range": range_string, "operator": operator}
 
 
 def _parse_range(range_string: str):

@@ -80,6 +80,19 @@ class AnalyticsEngine:
             "status": status,
         }
 
+    def kpi_pack(self, items: list) -> dict:
+        """Compute a batch of KPIs for a report pack.
+
+        Args:
+            items: list of {"name": str, "current": float, "target": float}.
+        """
+        kpis = [self.kpi(i.get("name", f"kpi_{n}"), i.get("current", 0),
+                         i.get("target", 0))
+                for n, i in enumerate(items or [])]
+        green = sum(1 for k in kpis if k["status"] == "green")
+        return {"kpis": kpis, "count": len(kpis), "green": green,
+                "all_green": green == len(kpis) and len(kpis) > 0}
+
     def linear_regression(self, x_data: list, y_data: list) -> dict:
         """Perform linear regression and return slope, intercept, R²."""
         x = np.array(x_data, dtype=float)

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 
 	"github.com/cam/mcp-onlyoffice/internal/agent"
@@ -12,11 +13,11 @@ import (
 func (h *ToolHandlers) handleDocumentAgent(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
 	task, _ := args["task"].(string)
 	if task == "" {
-		return textError("task is required"), nil
+		return jsonError("task is required"), nil
 	}
 	title, _ := args["title"].(string)
 	if title == "" {
-		return textError("title is required"), nil
+		return jsonError("title is required"), nil
 	}
 
 	templateName, _ := args["template"].(string)
@@ -28,12 +29,15 @@ func (h *ToolHandlers) handleDocumentAgent(ctx context.Context, args map[string]
 		tmplParams["title"] = title
 		rendered, err := templates.Render(templateName, tmplParams)
 		if err != nil {
-			return textError("template error: " + err.Error()), nil
+			audit("document_agent", "error", "template "+templateName+": "+trimError(err))
+			return jsonError("template error: " + err.Error()), nil
 		}
 		res, err := h.agent.Execute(ctx, rendered)
 		if err != nil {
-			return textError("agent error: " + err.Error()), nil
+			audit("document_agent", "error", trimError(err))
+			return jsonError("agent error: " + err.Error()), nil
 		}
+		audit("document_agent", "ok", title+" via "+templateName)
 		return jsonResult(res), nil
 	}
 
@@ -58,17 +62,34 @@ func (h *ToolHandlers) handleDocumentAgent(ctx context.Context, args map[string]
 		}
 	}
 
+	if task == "mail_merge" {
+		agentTask.Template, _ = args["template_text"].(string)
+		if recs, ok := args["records"].([]any); ok {
+			for _, r := range recs {
+				if rm, ok := r.(map[string]any); ok {
+					rec := make(map[string]string, len(rm))
+					for k, v := range rm {
+						rec[k] = fmt.Sprint(v)
+					}
+					agentTask.Records = append(agentTask.Records, rec)
+				}
+			}
+		}
+	}
+
 	res, err := h.agent.Execute(ctx, agentTask)
 	if err != nil {
-		return textError("agent error: " + err.Error()), nil
+		audit("document_agent", "error", trimError(err))
+		return jsonError("agent error: " + err.Error()), nil
 	}
+	audit("document_agent", "ok", title)
 	return jsonResult(res), nil
 }
 
 func (h *ToolHandlers) handleRunWorkflow(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
 	name, _ := args["workflow"].(string)
 	if name == "" {
-		return textError("workflow is required"), nil
+		return jsonError("workflow is required"), nil
 	}
 	params, _ := args["params"].(map[string]any)
 	if params == nil {
@@ -76,8 +97,10 @@ func (h *ToolHandlers) handleRunWorkflow(ctx context.Context, args map[string]an
 	}
 	res, err := h.wf.Execute(ctx, name, params)
 	if err != nil {
-		return textError("workflow error: " + err.Error()), nil
+		audit("run_workflow", "error", name+": "+trimError(err))
+		return jsonError("workflow error: " + err.Error()), nil
 	}
+	audit("run_workflow", "ok", name)
 	return jsonResult(res), nil
 }
 
@@ -86,13 +109,17 @@ func (h *ToolHandlers) handleListWorkflows(ctx context.Context, args map[string]
 }
 
 func (h *ToolHandlers) handleListTemplates(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
-	return jsonResult(templates.List()), nil
+	var out []map[string]string
+	for _, t := range templates.List() {
+		out = append(out, map[string]string{"name": t.Name, "description": t.Description})
+	}
+	return jsonResult(map[string]any{"templates": out}), nil
 }
 
 func (h *ToolHandlers) handleRenderTemplate(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
 	tmpl, _ := args["template"].(string)
 	if tmpl == "" {
-		return textError("template is required"), nil
+		return jsonError("template is required"), nil
 	}
 	params, _ := args["params"].(map[string]any)
 	if params == nil {
@@ -100,11 +127,11 @@ func (h *ToolHandlers) handleRenderTemplate(ctx context.Context, args map[string
 	}
 	rendered, err := templates.Render(tmpl, params)
 	if err != nil {
-		return textError("template error: " + err.Error()), nil
+		return jsonError("template error: " + err.Error()), nil
 	}
 	res, err := h.agent.Execute(ctx, rendered)
 	if err != nil {
-		return textError("agent error: " + err.Error()), nil
+		return jsonError("agent error: " + err.Error()), nil
 	}
 	return jsonResult(res), nil
 }
@@ -112,11 +139,11 @@ func (h *ToolHandlers) handleRenderTemplate(ctx context.Context, args map[string
 func (h *ToolHandlers) handleAnalyzeDocument(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
 	id, _ := args["id"].(string)
 	if id == "" {
-		return textError("id is required"), nil
+		return jsonError("id is required"), nil
 	}
 	analysis, err := h.analyzer.Analyze(id)
 	if err != nil {
-		return textError("analyze failed: " + err.Error()), nil
+		return jsonError("analyze failed: " + err.Error()), nil
 	}
 	return jsonResult(analysis), nil
 }
@@ -124,11 +151,11 @@ func (h *ToolHandlers) handleAnalyzeDocument(ctx context.Context, args map[strin
 func (h *ToolHandlers) handleValidateDocument(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
 	id, _ := args["id"].(string)
 	if id == "" {
-		return textError("id is required"), nil
+		return jsonError("id is required"), nil
 	}
 	valResult, err := h.validator.Validate(id)
 	if err != nil {
-		return textError("validate failed: " + err.Error()), nil
+		return jsonError("validate failed: " + err.Error()), nil
 	}
 	return jsonResult(valResult), nil
 }
@@ -136,7 +163,7 @@ func (h *ToolHandlers) handleValidateDocument(ctx context.Context, args map[stri
 func (h *ToolHandlers) handleDiscoverTools(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
 	query, _ := args["query"].(string)
 	if query == "" {
-		return textError("query is required"), nil
+		return jsonError("query is required"), nil
 	}
 	found := h.registry.Discover(query)
 	if len(found) == 0 {
@@ -155,7 +182,7 @@ func (h *ToolHandlers) handleLoadTier(ctx context.Context, args map[string]any) 
 		tierNum = int(t)
 	}
 	if tierNum < 2 || tierNum > 3 {
-		return textError("tier must be 2 or 3"), nil
+		return jsonError("tier must be 2 or 3"), nil
 	}
 	tools := h.registry.Tier(tierNum)
 	names := make([]string, len(tools))
@@ -168,11 +195,11 @@ func (h *ToolHandlers) handleLoadTier(ctx context.Context, args map[string]any) 
 func (h *ToolHandlers) handleCreateReport(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
 	title, _ := args["title"].(string)
 	if title == "" {
-		return textError("title is required"), nil
+		return jsonError("title is required"), nil
 	}
 	outputDir, _ := args["output_dir"].(string)
 	if outputDir == "" {
-		return textError("output_dir is required"), nil
+		return jsonError("output_dir is required"), nil
 	}
 	author, _ := args["author"].(string)
 	if author == "" {

@@ -9,6 +9,16 @@
 ## Features
 
 - **42 MCP tools** organized in 3 progressive tiers
+- **Hardened ZIP handling** — partial-extract on corrupt archives, ZipSlip guard, caps (10MB/file read, 100 files, 200MB total)
+- **Storage guardrails** — `MaxDocBytes` 10MB cap on document payloads
+- **Pinned Python deps** — `==` pins (openpyxl 3.1.5, python-docx 1.2.0, python-pptx 1.0.2, matplotlib 3.11.0, numpy 2.5.2, Pillow 12.3.0)
+- **OOXML native generator (no repair)** — ordered ZIP, docProps, sectPr, `t=b`, dimension, clrMap — opens clean in ONLYOFFICE/LibreOffice
+- **OOXML validator** — checks ZIP/XML/content_types/rels/metadata with 0–100 score
+- **Hardened engine bridge** — 120s timeout, capability allowlist, no traceback leaked to client
+- **New Python caps** — `excel.formulas`/`conditional`/`embed`, charts at DPI 150 (seaborn), 8-slide blue 16:9 decks + speaker notes, PDF cover + pagination + metadata
+- **Smarter planner** — per-step `expandReport`, persistent cache with deep-copy, `ExecutePlan` retry with alternative capability
+- **Workflow `batch_create`** + **agent `mail_merge`** (all record IDs returned)
+- **Observability** — `jsonError` envelope, JSONL audit log, `MCP_ONLYOFFICE_LOG_LEVEL` env
 - **Document creation** — Word, spreadsheets, presentations from natural language descriptions
 - **ONLYOFFICE Desktop integration** — Open, edit, insert text, create tables and lists in the editor via WebSocket plugin
 - **Python engine** — Charts, analytics, Excel manipulation, PDF generation, image processing
@@ -324,17 +334,20 @@ The Python engine (`python_engine/`) provides these capability paths for the `py
 | `excel.create_workbook` | xl | Create workbook with sheets |
 | `excel.insert_data` | xl | Insert rows/columns |
 | `excel.create_kpi_sheet` | xl | KPI dashboard sheet |
-| `charts.create_bar_chart` | charts | Bar chart (matplotlib) |
+| `excel.insert_formula` | xl | Insert formulas (`excel.formulas`) |
+| `excel.conditional_format` | xl | Conditional formatting (`excel.conditional`) |
+| `charts.embed_in_excel` | charts | Embed chart PNG into workbook (`excel.embed`) |
+| `charts.create_bar_chart` | charts | Bar chart (matplotlib, DPI 150, seaborn style) |
 | `charts.create_line_chart` | charts | Line chart |
 | `charts.create_pie_chart` | charts | Pie chart |
 | `charts.create_heatmap` | charts | Heatmap |
 | `charts.create_financial_chart` | charts | Financial/stock chart |
 | `documents.create_report` | docs | Report with python-docx |
-| `presentations.create_deck` | pres | Slide deck with python-pptx |
+| `presentations.create_deck` | pres | Slide deck with python-pptx (8-slide blue 16:9 theme + speaker notes) |
 | `analytics.descriptive_stats` | analytics | Mean, median, std dev |
 | `analytics.frequency_analysis` | analytics | Frequency distribution |
 | `analytics.aggregate_data` | analytics | Group and aggregate |
-| `pdf.generate_pdf` | pdf | Generate PDF from text |
+| `pdf.generate_pdf` | pdf | Generate PDF from text (cover page + pagination + title/author metadata) |
 | `images.convert_image` | images | Format conversion |
 | `images.resize_image` | images | Resize dimensions |
 
@@ -475,28 +488,39 @@ Based on the development plan in `system_prompt_mcp_onlyoffice_v2.md`:
 
 | Phase | Status | Description |
 |-------|--------|-------------|
-| 1. Audit & Refactor | Pending | Code quality audit, fix ignored errors |
-| 2. Architecture Design | Pending | Clean architecture boundaries |
-| 3. Bug Fixes | Pending | Fix ZIP, storage, and dependency issues |
-| 4. Document Agent | ✅ Done | `internal/agent/` |
-| 5. Workflow Engine | ✅ Done | `internal/workflow/` |
+| 1. Audit & Refactor | ✅ Done | Code quality audit, fixed ignored errors |
+| 2. Architecture Design | ✅ Done | Clean architecture boundaries |
+| 3. Bug Fixes | ✅ Done | Fixed ZIP (partial extract + ZipSlip + caps), storage (MaxDocBytes), pinned deps |
+| 4. Document Agent | ✅ Done | `internal/agent/` (incl. `mail_merge`) |
+| 5. Workflow Engine | ✅ Done | `internal/workflow/` (incl. `batch_create`) |
 | 6. Template System | ✅ Done | `internal/templates/` |
 | 7. Document Analyzer | ✅ Done | `internal/analyzer/` |
-| 8. Validator | ✅ Done | `internal/validator/` |
+| 8. Validator | ✅ Done | `internal/validator/` (ZIP/XML/content_types/rels/metadata, 0–100 score) |
 | 9. Cross-Doc References | ✅ Done | `add_document_reference` |
-| 10. Observability | Pending | Metrics, logging, tracing |
-| 11. Testing | Partial | Basic tests exist, needs expansion |
-| 12. Performance Refactor | Pending | tools.go > 800 lines refactor |
+| 10. Observability | ✅ Done | `jsonError` envelope, JSONL audit log, `MCP_ONLYOFFICE_LOG_LEVEL` |
+| 11. Testing | ✅ Done | `go test` ooxml/validator/planner/workflow/storage pass |
+| 12. Performance Refactor | ✅ Done | Hardened engine bridge (120s timeout + allowlist, no traceback leak), planner persistent deep-copy cache + retry |
 
 ---
 
 ## Known Issues
 
-- **ZIP operations**: Some error returns are silently ignored in `create_zip`/`extract_zip`
-- **Storage delete**: Error from `os.Remove` may be ignored in some paths
-- **Dead dependency**: `golang.org/x/oauth2` is indirect but no longer needed
-- **tools.go**: File exceeds 800 lines — needs refactoring into separate files
 - **ONLYOFFICE plugin**: Requires Desktop Editors installed and running
+- **tools.go**: File exceeds 800 lines — candidate for future split into separate files
+
+## Pack Q3 v2 + Validation
+
+End-to-end validation pack (`/tmp/onlyoffice_e2e_v2`, score **100**):
+
+- OOXML native generation opens clean (no repair) in ONLYOFFICE/LibreOffice
+- Validator checks pass (ZIP/XML/content_types/rels/metadata)
+- Python engine caps verified: Excel formulas/conditional/embed, charts DPI 150, 8-slide blue 16:9 decks + notes, PDF cover + pagination + metadata
+- Planner `expandReport` per-step params, persistent deep-copy cache, `ExecutePlan` retry
+- `go test ./internal/ooxml/ ./internal/validator/` (plus planner/workflow/storage) — all pass
+
+```bash
+go test ./internal/ooxml/ ./internal/validator/ ./internal/planner/ ./internal/workflow/ ./internal/storage/
+```
 
 ## Troubleshooting
 

@@ -18,6 +18,9 @@ type LocalStore struct {
 	metaFn string
 }
 
+// MaxDocBytes caps document payloads accepted by Create and Update.
+const MaxDocBytes = 10 << 20
+
 func NewLocalStore(base string) (*LocalStore, error) {
 	abs, err := filepath.Abs(base)
 	if err != nil {
@@ -46,12 +49,13 @@ type metaEntry struct {
 	Refs       []string  `json:"refs,omitempty"`
 }
 
-func (s *LocalStore) metaPath(id string) string {
-	return filepath.Join(s.base, id+".meta.json")
-}
-
 func (s *LocalStore) dataPath(id string) string {
 	return filepath.Join(s.base, id+".data")
+}
+
+// BaseDir returns the absolute storage root (used to sandbox zip extraction).
+func (s *LocalStore) BaseDir() string {
+	return s.base
 }
 
 func (s *LocalStore) saveMeta(entries map[string]metaEntry) error {
@@ -69,6 +73,9 @@ func (s *LocalStore) Create(filename string, data []byte) (*Document, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if len(data) > MaxDocBytes {
+		return nil, fmt.Errorf("document payload %d bytes exceeds %d byte limit", len(data), MaxDocBytes)
+	}
 	id := uuid.NewString()
 	now := time.Now()
 
@@ -173,7 +180,10 @@ func (s *LocalStore) Delete(id string) error {
 	if err := os.Remove(s.dataPath(id)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove data file: %w", err)
 	}
-	if err := os.Remove(s.metaPath(id)); err != nil && !os.IsNotExist(err) {
+	// NOTE: per-document "<id>.meta.json" sidecars were never written
+	// (metadata lives in .metadata.json); the best-effort legacy cleanup
+	// below only matters for stores created by very old versions.
+	if err := os.Remove(filepath.Join(s.base, id+".meta.json")); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove meta file: %w", err)
 	}
 	delete(entries, id)
@@ -199,6 +209,9 @@ func (s *LocalStore) Update(id string, data []byte) (*Document, error) {
 		return nil, ErrNotFound
 	}
 
+	if len(data) > MaxDocBytes {
+		return nil, fmt.Errorf("document payload %d bytes exceeds %d byte limit", len(data), MaxDocBytes)
+	}
 	entry.Size = int64(len(data))
 	entry.ModifiedAt = time.Now()
 

@@ -47,7 +47,24 @@ func (im *Improvement) Analyze() []Suggestion {
 	suggestions = append(suggestions, im.analyzeRedundancy()...)
 	suggestions = append(suggestions, im.analyzeEfficiency()...)
 
+	sort.SliceStable(suggestions, func(i, j int) bool {
+		return severityRank(suggestions[i].Severity) > severityRank(suggestions[j].Severity)
+	})
+
 	return suggestions
+}
+
+func severityRank(s string) int {
+	switch s {
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func (im *Improvement) analyzeFailures() []Suggestion {

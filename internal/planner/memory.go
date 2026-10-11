@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 )
@@ -406,16 +405,9 @@ func (er *ErrorRecovery) SuggestAlternative(failedCapability string) []string {
 		"analytics.statistics":      {"analytics.aggregate", "analytics.frequency"},
 	}
 
-	if alts, ok := alt[filterCapability(failedCapability)]; ok {
+	if alts, ok := alt[failedCapability]; ok {
 		return alts
 	}
 	return nil
 }
 
-func filterCapability(cap string) string {
-	parts := strings.SplitN(cap, ".", 2)
-	if len(parts) == 2 {
-		return parts[1]
-	}
-	return cap
-}

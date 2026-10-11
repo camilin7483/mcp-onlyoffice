@@ -2,18 +2,27 @@ package engine
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
+
+// DefaultEngineTimeout bounds every request to the Python engine.
+// Override per-bridge via the Timeout field.
+const DefaultEngineTimeout = 120 * time.Second
+
+// capabilityPattern is the allowlist: "module.method" in dot notation,
+// plus the internal "__list__" and "__version__" commands.
+// Anything else (paths, shell metachars, spaces) is rejected before IPC.
+var capabilityPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`)
 
 // Request is sent to the Python Engine via stdin.
 type Request struct {
@@ -52,6 +61,15 @@ type Bridge struct {
 	stdin        io.WriteCloser
 	stdout       *bufio.Reader
 	cancel       context.CancelFunc
+	// Timeout bounds each Execute call. Zero means DefaultEngineTimeout.
+	//
+	// NOTE: on timeout the reader goroutine blocked in ReadString is NOT
+	// killed — it stays parked until the next response line arrives on
+	// stdout or the process dies (channel is buffered with cap 1, so at
+	// most one zombie goroutine per timed-out call; it is reaped on the
+	// next successful read or process restart). If this ever matters,
+	// kill and restart the subprocess on timeout instead of reusing it.
+	Timeout time.Duration
 }
 
 // NewBridge creates a new Python Engine bridge.
@@ -97,8 +115,12 @@ func (b *Bridge) startLocked(ctx context.Context) error {
 	b.stopLocked()
 
 	runnerPath := b.runnerPath()
+	if runnerPath == "" {
+		return fmt.Errorf("empty engine path: set Bridge enginePath to the python_engine directory or runner.py")
+	}
 
 	engCtx, cancel := context.WithCancel(ctx)
+	// No shell is involved: argv is [python, runner.py] executed directly.
 	cmd := exec.CommandContext(engCtx, b.pythonCmd, runnerPath)
 
 	stdin, err := cmd.StdinPipe()
@@ -121,7 +143,7 @@ func (b *Bridge) startLocked(ctx context.Context) error {
 
 	if err := cmd.Start(); err != nil {
 		cancel()
-		return fmt.Errorf("start python engine: %w", err)
+		return fmt.Errorf("start python engine (%s %s): %w (hint: install python3 and run: pip install -r python_engine/requirements.txt)", b.pythonCmd, runnerPath, err)
 	}
 
 	b.cmd = cmd
@@ -169,7 +191,30 @@ func (b *Bridge) startLocked(ctx context.Context) error {
 	return nil
 }
 
+// validateCapability enforces the allowlist and rejects shell metachars.
+// Internal commands "__list__" and "__version__" are always allowed.
+func validateCapability(capability string) error {
+	if capability == "__list__" || capability == "__version__" {
+		return nil
+	}
+	if capability == "" {
+		return fmt.Errorf("empty capability: must be \"module.method\" (e.g. \"excel.create_workbook\")")
+	}
+	if capabilityPattern.MatchString(capability) {
+		return nil
+	}
+	return fmt.Errorf("rejected capability %q: must match \"module.method\" with lowercase letters, digits, underscores (e.g. \"excel.create_workbook\")", capability)
+}
+
 // processAlive checks whether the Python subprocess is still running.
+
+// timeout returns the effective per-request timeout.
+func (b *Bridge) timeout() time.Duration {
+	if b.Timeout > 0 {
+		return b.Timeout
+	}
+	return DefaultEngineTimeout
+}
 func (b *Bridge) processAlive() bool {
 	if b.cmd == nil || b.cmd.Process == nil {
 		return false
@@ -193,7 +238,19 @@ func (b *Bridge) ensureAlive(ctx context.Context) error {
 
 // Execute sends a capability request to the Python Engine and returns the response.
 // If the Python subprocess has died, it is automatically restarted before retrying.
+//
+// The mutex covers the whole write+read cycle on purpose: the subprocess
+// speaks lock-step JSON-lines over a single stdin/stdout pair, so two
+// interleaved writes would scramble responses. For concurrent execution
+// use EnginePool (one Bridge per process), not parallel Execute on one Bridge.
 func (b *Bridge) Execute(ctx context.Context, capability string, params map[string]any) (*Response, error) {
+	if err := validateCapability(capability); err != nil {
+		return nil, err
+	}
+	if params == nil {
+		params = map[string]any{}
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -209,16 +266,30 @@ func (b *Bridge) Execute(ctx context.Context, capability string, params map[stri
 		slog.Warn("engine call failed, restarting and retrying",
 			"capability", capability, "error", err)
 		if restartErr := b.startLocked(ctx); restartErr != nil {
-			return nil, fmt.Errorf("engine restart after failure: %w", restartErr)
+			return nil, fmt.Errorf("engine restart after failure (capability %q): %w", capability, restartErr)
 		}
 		resp, err = b.executeLocked(ctx, capability, params)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		return nil, fmt.Errorf("engine returned no response for capability %q: restart the engine and retry", capability)
+	}
+	if resp.Status == "error" && resp.Error == "" {
+		resp.Error = fmt.Sprintf("capability %q failed without detail; check engine stderr logs", capability)
 	}
 	return resp, err
 }
 
 // executeLocked performs a single request-response cycle.
+// Never invokes a shell: the Python interpreter is exec'd directly with
+// runner.py as argv (no sh -c), so capability/params cannot inject commands.
 // Caller must hold b.mu.
 func (b *Bridge) executeLocked(ctx context.Context, capability string, params map[string]any) (*Response, error) {
+	if params == nil {
+		params = map[string]any{}
+	}
 	req := Request{
 		Capability: capability,
 		Params:     params,
@@ -226,12 +297,12 @@ func (b *Bridge) executeLocked(ctx context.Context, capability string, params ma
 
 	data, err := json.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
+		return nil, fmt.Errorf("marshal request for capability %q: %w (hint: params must be JSON-serializable)", capability, err)
 	}
 
 	// Write the request line to stdin.
 	if _, err := fmt.Fprintln(b.stdin, string(data)); err != nil {
-		return nil, fmt.Errorf("write to engine: %w", err)
+		return nil, fmt.Errorf("write capability %q to engine: %w (hint: engine may have crashed; check stderr logs)", capability, err)
 	}
 
 	// Read the response line from stdout.
@@ -244,29 +315,33 @@ func (b *Bridge) executeLocked(ctx context.Context, capability string, params ma
 	go func() {
 		line, readErr := b.stdout.ReadString('\n')
 		if readErr != nil && line == "" {
-			ch <- respResult{nil, fmt.Errorf("engine closed: %w", readErr)}
+			ch <- respResult{nil, fmt.Errorf("engine closed during capability %q: %w (hint: runner.py crashed; check stderr logs)", capability, readErr)}
 			return
 		}
 		line = strings.TrimSpace(line)
 		if line == "" {
-			ch <- respResult{nil, fmt.Errorf("empty response from engine")}
+			ch <- respResult{nil, fmt.Errorf("empty response from engine for capability %q (hint: runner.py printed nothing; check stderr logs)", capability)}
 			return
 		}
 		var resp Response
 		if err := json.Unmarshal([]byte(line), &resp); err != nil {
-			ch <- respResult{nil, fmt.Errorf("parse response: %w (line: %s)", err, truncate(line, 200))}
+			ch <- respResult{nil, fmt.Errorf("parse response for capability %q: %w (line: %s)", capability, err, truncate(line, 200))}
 			return
 		}
 		ch <- respResult{&resp, nil}
 	}()
 
+	timeout := b.timeout()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
 	select {
 	case result := <-ch:
 		return result.resp, result.err
 	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-time.After(120 * time.Second):
-		return nil, fmt.Errorf("engine timeout (120s) for capability: %s", capability)
+		return nil, fmt.Errorf("capability %q cancelled: %w", capability, ctx.Err())
+	case <-timer.C:
+		return nil, fmt.Errorf("engine timeout (%s) for capability %q (hint: retry with a larger Bridge.Timeout or split the workload)", timeout, capability)
 	}
 }
 
@@ -298,11 +373,13 @@ func (b *Bridge) listCapabilitiesLocked(ctx context.Context) ([]CapabilityInfo, 
 	return caps, nil
 }
 
-// Capabilities returns the cached list of capabilities.
+// Capabilities returns a copy of the cached list of capabilities.
 func (b *Bridge) Capabilities() []CapabilityInfo {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.capabilities
+	out := make([]CapabilityInfo, len(b.capabilities))
+	copy(out, b.capabilities)
+	return out
 }
 
 // Stop cleanly shuts down the Python Engine.
@@ -458,6 +535,3 @@ func (p *EnginePool) Stop() {
 		b.Stop()
 	}
 }
-
-// Ensure bytes.Buffer is not unused
-var _ = bytes.Buffer{}

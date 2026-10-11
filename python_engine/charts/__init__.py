@@ -19,6 +19,19 @@ import base64
 from io import BytesIO
 
 
+BRAND_COLORS = ["#1F4E79", "#2E75B6", "#ED7D31",
+                "#A5A5A5", "#5B9BD5", "#70AD47", "#264478", "#9E480E"]
+CHART_STYLE = "seaborn-v0_8"
+
+
+def _apply_style() -> None:
+    """Use the pro chart style with fallback when unavailable."""
+    try:
+        plt.style.use(CHART_STYLE)
+    except OSError:
+        plt.style.use("ggplot")
+
+
 class ChartEngine:
     """Reusable chart capabilities. NOT a tool — a library."""
 
@@ -41,41 +54,58 @@ class ChartEngine:
 
     def bar_chart(self, categories: list, values: list,
                   title: str = "Bar Chart", xlabel: str = None,
-                  ylabel: str = None, color: str = "#4472C4",
+                  ylabel: str = None, color: str = "#1F4E79",
                   horizontal: bool = False, path: str = None,
-                  format: str = "png") -> dict:
-        """Create a bar chart."""
+                  format: str = "png", dpi: int = 150,
+                  colors: list = None) -> dict:
+        """Create a bar chart with value labels, grid and brand palette."""
+        _apply_style()
         plt.figure(figsize=(10, 6))
+        palette = colors or [color]
+        bar_colors = [palette[i % len(palette)] for i in range(len(categories))]
         y_pos = range(len(categories))
         if horizontal:
-            plt.barh(y_pos, values, color=color)
-            plt.yticks(y_pos, categories)
+            bars = plt.barh(y_pos, values, color=bar_colors, edgecolor="white")
+            plt.yticks(list(y_pos), categories)
+            plt.bar_label(bars, fmt="%.1f", padding=3)
+            plt.grid(True, axis="x", alpha=0.3)
         else:
-            plt.bar(y_pos, values, color=color)
-            plt.xticks(y_pos, categories, rotation=45, ha="right")
+            bars = plt.bar(y_pos, values, color=bar_colors, edgecolor="white")
+            plt.xticks(list(y_pos), categories, rotation=45, ha="right")
+            plt.bar_label(bars, fmt="%.1f", padding=3)
+            plt.grid(True, axis="y", alpha=0.3)
         plt.title(title, fontsize=14, pad=15)
         if xlabel:
             plt.xlabel(xlabel)
         if ylabel:
             plt.ylabel(ylabel)
         plt.tight_layout()
-        return self._save(path, format)
+        return self._save(path, format, dpi=dpi)
 
     def line_chart(self, x_data: list, y_series: list,
                    labels: list = None, title: str = "Line Chart",
                    xlabel: str = None, ylabel: str = None,
-                   path: str = None, format: str = "png") -> dict:
-        """Create a line chart with one or more series."""
+                   path: str = None, format: str = "png",
+                   dpi: int = 150, colors: list = None) -> dict:
+        """Create a line chart with one or more series, grid and labels."""
+        _apply_style()
         plt.figure(figsize=(10, 6))
-        colors = ["#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5", "#70AD47"]
+        palette = colors or BRAND_COLORS
         if isinstance(y_series[0], (list, tuple)):
             for i, ys in enumerate(y_series):
                 label = labels[i] if labels and i < len(labels) else f"Series {i+1}"
-                plt.plot(x_data[:len(ys)], ys, marker="o", color=colors[i % len(colors)],
-                         linewidth=2, label=label)
+                (line,) = plt.plot(x_data[:len(ys)], ys, marker="o",
+                                   color=palette[i % len(palette)],
+                                   linewidth=2, label=label)
+                for x, y in zip(x_data[:len(ys)], ys):
+                    plt.text(x, y, f"{y}", ha="center", va="bottom",
+                             fontsize=8, color=line.get_color())
             plt.legend()
         else:
-            plt.plot(x_data, y_series, marker="o", color=colors[0], linewidth=2)
+            (line,) = plt.plot(x_data, y_series, marker="o",
+                               color=palette[0], linewidth=2)
+            for x, y in zip(x_data, y_series):
+                plt.text(x, y, f"{y}", ha="center", va="bottom", fontsize=8)
         plt.title(title, fontsize=14, pad=15)
         if xlabel:
             plt.xlabel(xlabel)
@@ -83,15 +113,16 @@ class ChartEngine:
             plt.ylabel(ylabel)
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
-        return self._save(path, format)
+        return self._save(path, format, dpi=dpi)
 
     def pie_chart(self, labels: list, values: list,
                   title: str = "Pie Chart", path: str = None,
-                  format: str = "png", colors: list = None) -> dict:
-        """Create a pie chart."""
+                  format: str = "png", colors: list = None,
+                  dpi: int = 150) -> dict:
+        """Create a pie chart with pct value labels and brand palette."""
+        _apply_style()
         plt.figure(figsize=(8, 8))
-        default_colors = ["#4472C4", "#ED7D31", "#A5A5A5", "#FFC000",
-                          "#5B9BD5", "#70AD47", "#264478", "#9B57A0"]
+        default_colors = BRAND_COLORS
         wedges, texts, autotexts = plt.pie(
             values, labels=labels, autopct="%1.1f%%",
             colors=colors or default_colors, startangle=90,
@@ -100,7 +131,7 @@ class ChartEngine:
         plt.title(title, fontsize=14, pad=15)
         plt.axis("equal")
         plt.tight_layout()
-        return self._save(path, format)
+        return self._save(path, format, dpi=dpi)
 
     def histogram(self, data: list, bins: int = 10,
                   title: str = "Histogram", xlabel: str = None,
@@ -190,3 +221,27 @@ class ChartEngine:
             result["base64"] = base64.b64encode(result["buffer"].getvalue()).decode()
             del result["buffer"]
         return result
+
+    def embed_in_excel(self, chart_path: str, excel_path: str,
+                       sheet_name: str = None, cell: str = "H2",
+                       width: int = 640, height: int = 480) -> dict:
+        """Embed an existing chart image (PNG) into a workbook sheet.
+
+        Compose with bar_chart/line_chart/... via their `path` param:
+        generate the PNG first, then embed it here.
+        """
+        import os as _os
+        from openpyxl import load_workbook as _load
+        from openpyxl.drawing.image import Image as _XLImage
+        if not _os.path.exists(chart_path):
+            return {"status": "error", "error": f"Chart image not found: {chart_path}"}
+        wb = _load(excel_path)
+        ws = wb[sheet_name] if sheet_name else wb.active
+        img = _XLImage(chart_path)
+        img.width = width
+        img.height = height
+        img.anchor = cell
+        ws.add_image(img)
+        wb.save(excel_path)
+        wb.close()
+        return {"path": excel_path, "chart": chart_path, "cell": cell}

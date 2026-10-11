@@ -12,7 +12,7 @@ import (
 func (h *ToolHandlers) handlePythonEngine(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
 	capability, _ := args["capability"].(string)
 	if capability == "" {
-		return textError("capability is required"), nil
+		return jsonError("capability is required"), nil
 	}
 
 	params, _ := args["params"].(map[string]any)
@@ -26,11 +26,13 @@ func (h *ToolHandlers) handlePythonEngine(ctx context.Context, args map[string]a
 
 	if err != nil {
 		h.opMemory.RecordError(capability, "", err.Error(), duration)
-		return textError("engine error: " + err.Error()), nil
+		audit("python_engine", "error", capability+": "+trimError(err))
+		return jsonError("engine error: " + err.Error()), nil
 	}
 
 	if resp.Status == "error" {
 		h.opMemory.RecordError(capability, "", resp.Error, duration)
+		audit("python_engine", "error", capability+": "+resp.Error)
 
 		if h.opMemory.KnownFailure(capability) {
 			alternatives := h.planExec.SuggestAlternative(capability)
@@ -42,10 +44,11 @@ func (h *ToolHandlers) handlePythonEngine(ctx context.Context, args map[string]a
 			}
 		}
 
-		return textError("capability " + capability + " failed: " + resp.Error), nil
+		return jsonError("capability " + capability + " failed: " + resp.Error), nil
 	}
 
 	h.opMemory.RecordSuccess(capability, "", duration)
+	audit("python_engine", "ok", capability)
 
 	return jsonResult(map[string]any{
 		"status": resp.Status, "capability": capability,
@@ -57,7 +60,7 @@ func (h *ToolHandlers) handlePythonEngine(ctx context.Context, args map[string]a
 func (h *ToolHandlers) handlePlanner(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
 	objective, _ := args["objective"].(string)
 	if objective == "" {
-		return textError("objective is required"), nil
+		return jsonError("objective is required"), nil
 	}
 
 	params, _ := args["params"].(map[string]any)
@@ -76,7 +79,7 @@ func (h *ToolHandlers) handlePlanner(ctx context.Context, args map[string]any) (
 
 	plan, err := h.planner.CreatePlan(ctx, objective, params)
 	if err != nil {
-		return textError("plan creation failed: " + err.Error()), nil
+		return jsonError("plan creation failed: " + err.Error()), nil
 	}
 
 	intentName := fmt.Sprintf("%d", plan.Intent.Primary)
@@ -162,6 +165,7 @@ func (h *ToolHandlers) handlePlanner(ctx context.Context, args map[string]any) (
 
 	h.opMemory.Record("planner", overallStatus, objective, "", duration)
 	h.opMemory.RecordTask(objective, intentName, capsUsed, duration, len(plan.Steps), errStr)
+	audit("planner", overallStatus, objective)
 
 	return jsonResult(map[string]any{
 		"result":     execResult,

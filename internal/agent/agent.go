@@ -26,9 +26,11 @@ type Section struct {
 }
 
 type AgentTask struct {
-	Task     string    `json:"task"`
-	Title    string    `json:"title"`
-	Sections []Section `json:"sections,omitempty"`
+	Task     string              `json:"task"`
+	Title    string              `json:"title"`
+	Sections []Section           `json:"sections,omitempty"`
+	Template string              `json:"template,omitempty"`
+	Records  []map[string]string `json:"records,omitempty"`
 }
 
 type AgentResult struct {
@@ -61,6 +63,8 @@ func (a *DocumentAgent) Execute(ctx context.Context, task *AgentTask) (*AgentRes
 	switch task.Task {
 	case "create_report":
 		res, err = a.createReport(ctx, task)
+	case "mail_merge":
+		res, err = a.mailMerge(ctx, task)
 	default:
 		return nil, fmt.Errorf("unknown task: %s", task.Task)
 	}
@@ -82,6 +86,7 @@ func (a *DocumentAgent) createReport(ctx context.Context, task *AgentTask) (*Age
 		{Text: task.Title, Size: 28, Bold: true},
 	}
 
+	var docs []AgentDocument
 	for _, s := range task.Sections {
 		if s.Heading != "" {
 			paras = append(paras, ooxml.DocxParagraph{Text: s.Heading, Size: 24, Bold: true})
@@ -102,9 +107,14 @@ func (a *DocumentAgent) createReport(ctx context.Context, task *AgentTask) (*Age
 					return nil, fmt.Errorf("create table docx: %w", err)
 				}
 				filename := sanitizeFilename(s.Heading) + ".docx"
-				if _, err := a.store.Create(filename, docxData); err != nil {
+				if filename == ".docx" {
+					filename = sanitizeFilename(task.Title) + "-table.docx"
+				}
+				tdoc, err := a.store.Create(filename, docxData)
+				if err != nil {
 					return nil, fmt.Errorf("store table docx: %w", err)
 				}
+				docs = append(docs, toAgentDocument(tdoc))
 			}
 		}
 	}
@@ -120,20 +130,59 @@ func (a *DocumentAgent) createReport(ctx context.Context, task *AgentTask) (*Age
 	if err != nil {
 		return nil, fmt.Errorf("store docx: %w", err)
 	}
+	docs = append(docs, toAgentDocument(doc))
 
-	result := &AgentResult{
-		Documents: []AgentDocument{
-			{
-				ID:        doc.ID,
-				Filename:  doc.Filename,
-				MimeType:  doc.MimeType,
-				Size:      doc.Size,
-				CreatedAt: doc.CreatedAt.Format(time.RFC3339),
-			},
-		},
+	return &AgentResult{Documents: docs}, nil
+}
+
+func toAgentDocument(doc *storage.Document) AgentDocument {
+	return AgentDocument{
+		ID:        doc.ID,
+		Filename:  doc.Filename,
+		MimeType:  doc.MimeType,
+		Size:      doc.Size,
+		CreatedAt: doc.CreatedAt.Format(time.RFC3339),
+	}
+}
+
+// mailMerge renders Template ({{field}} placeholders) once per record in Records,
+// storing one DOCX per record. The Python engine has no mail-merge capability,
+// so the agent owns it.
+func (a *DocumentAgent) mailMerge(ctx context.Context, task *AgentTask) (*AgentResult, error) {
+	if task.Template == "" {
+		return nil, fmt.Errorf("mail_merge: template is required")
+	}
+	if len(task.Records) == 0 {
+		return nil, fmt.Errorf("mail_merge: records is required (non-empty)")
 	}
 
-	return result, nil
+	res := &AgentResult{}
+	for i, rec := range task.Records {
+		body := task.Template
+		for k, v := range rec {
+			body = strings.ReplaceAll(body, "{{"+k+"}}", v)
+		}
+		title := fmt.Sprintf("%s %d", task.Title, i+1)
+		if name, ok := rec["name"]; ok && name != "" {
+			title = fmt.Sprintf("%s %s", task.Title, name)
+		}
+		data, err := ooxml.CreateDOCXFromText(title, body)
+		if err != nil {
+			return nil, fmt.Errorf("mail_merge record %d: %w", i, err)
+		}
+		doc, err := a.store.Create(sanitizeFilename(title)+".docx", data)
+		if err != nil {
+			return nil, fmt.Errorf("mail_merge record %d: %w", i, err)
+		}
+		res.Documents = append(res.Documents, AgentDocument{
+			ID:        doc.ID,
+			Filename:  doc.Filename,
+			MimeType:  doc.MimeType,
+			Size:      doc.Size,
+			CreatedAt: doc.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	return res, nil
 }
 
 func sanitizeFilename(name string) string {

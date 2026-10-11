@@ -1,25 +1,23 @@
 # Python Engine — internal capability library for mcp-onlyoffice
 # Install: pip install -r requirements.txt
+# Pinned versions verified against the local environment (Python 3.14).
 
 # Excel
-openpyxl>=3.1.0
+openpyxl==3.1.5
 
 # Documents
-python-docx>=1.1.0
+python-docx==1.2.0
 
 # Presentations
-python-pptx>=0.6.21
+python-pptx==1.0.2
 
 # Charts
-matplotlib>=3.7.0
-numpy>=1.24.0
+matplotlib==3.11.0
+numpy==2.5.2
 
 # PDF
-fpdf2>=2.7.0
-PyPDF2>=3.0.0
+fpdf2==2.7.0
+PyPDF2==3.0.0
 
 # Images
-Pillow>=10.0.0
-
-# Analytics
-numpy>=1.24.0
+Pillow==12.3.0

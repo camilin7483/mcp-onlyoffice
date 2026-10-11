@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -32,8 +33,8 @@ func NewPlanCache() *PlanCache {
 }
 
 func (c *PlanCache) Lookup(objective string) *Plan {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	key := normalize(objective)
 	cached, ok := c.plans[key]
@@ -45,7 +46,7 @@ func (c *PlanCache) Lookup(objective string) *Plan {
 		return nil
 	}
 	cached.Hits++
-	return cached.Plan
+	return clonePlan(cached.Plan)
 }
 
 func (c *PlanCache) Store(objective string, plan *Plan) {
@@ -54,9 +55,18 @@ func (c *PlanCache) Store(objective string, plan *Plan) {
 
 	key := normalize(objective)
 	c.plans[key] = &CachedPlan{
-		Plan:      plan,
+		Plan:      clonePlan(plan),
 		CreatedAt: time.Now(),
 	}
+	c.save()
+}
+
+func (c *PlanCache) save() {
+	b, err := json.Marshal(c.plans)
+	if err != nil {
+		return
+	}
+	os.WriteFile(c.path, b, 0644)
 }
 
 func (c *PlanCache) Stats() map[string]any {
@@ -85,22 +95,59 @@ func (c *PlanCache) load() {
 	c.plans = plans
 }
 
+// normalize is the single place for key normalization: lower + whitespace fold.
 func normalize(s string) string {
-	b := []byte(s)
-	space := false
-	j := 0
-	for i := 0; i < len(b); i++ {
-		if b[i] == ' ' || b[i] == '\t' || b[i] == '\n' {
-			if !space {
-				b[j] = ' '
-				j++
-				space = true
-			}
-		} else {
-			b[j] = b[i]
-			j++
-			space = false
+	s = strings.ToLower(strings.TrimSpace(s))
+	fields := strings.Fields(s)
+	return strings.Join(fields, " ")
+}
+
+func clonePlan(p *Plan) *Plan {
+	if p == nil {
+		return nil
+	}
+	out := &Plan{
+		Objective: p.Objective,
+		Intent:    cloneIntent(p.Intent),
+		CreatedAt: p.CreatedAt,
+	}
+	out.Steps = make([]PlanStep, len(p.Steps))
+	for i, s := range p.Steps {
+		out.Steps[i] = PlanStep{
+			Capability: s.Capability,
+			StepID:     s.StepID,
+			Params:     cloneParams(s.Params),
+		}
+		if s.DependsOn != nil {
+			out.Steps[i].DependsOn = append([]string(nil), s.DependsOn...)
 		}
 	}
-	return string(b[:j])
+	return out
+}
+
+func cloneIntent(in Intent) Intent {
+	out := Intent{
+		Primary:    in.Primary,
+		Confidence: in.Confidence,
+	}
+	out.Secondary = append([]IntentType(nil), in.Secondary...)
+	out.Outputs = append([]string(nil), in.Outputs...)
+	if in.Entities != nil {
+		out.Entities = make(map[string]string, len(in.Entities))
+		for k, v := range in.Entities {
+			out.Entities[k] = v
+		}
+	}
+	return out
+}
+
+func cloneParams(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }

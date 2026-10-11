@@ -23,7 +23,35 @@ from python_engine.presentations import PresentationEngine
 from python_engine.analytics import AnalyticsEngine
 from python_engine.pdf import PDFEngine
 from python_engine.images import ImageEngine
-from python_engine.validator import validate_result
+from python_engine.validator import validate_params, validate_result
+
+import base64
+
+
+def _sanitize(value):
+    """Convert a result to JSON-serializable data for the stdin/stdout IPC.
+
+    Binary buffers (BytesIO from charts) become base64 strings;
+    anything else non-serializable falls back to str().
+    """
+    import json as _json
+
+    if isinstance(value, dict):
+        return {k: _sanitize(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize(v) for v in value]
+    if isinstance(value, (bytes, bytearray)):
+        return base64.b64encode(bytes(value)).decode()
+    if hasattr(value, "getvalue") and callable(value.getvalue):
+        try:
+            return base64.b64encode(value.getvalue()).decode()
+        except Exception:
+            return str(value)
+    try:
+        _json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        return str(value)
 
 
 class PythonEngine:
@@ -45,6 +73,11 @@ class PythonEngine:
     def execute(self, capability: str, params: dict) -> dict:
         """Execute a named capability with parameters.
 
+        Only "module.method" (exactly one dot) is accepted, where module
+        is one of the explicit MODULES below and method is a public
+        callable defined directly on that engine object. Nested paths
+        ("a.b.c"), private/dunder attributes and anything else are rejected.
+
         Args:
             capability: Dot-notation path to capability (e.g. "excel.create_workbook")
             params: Capability-specific parameters
@@ -55,23 +88,42 @@ class PythonEngine:
         Raises:
             ValueError: If capability is unknown
         """
+        if not isinstance(capability, str):
+            return {"status": "error", "error": f"Invalid capability: {capability!r}"}
         parts = capability.split(".")
-        if len(parts) < 2:
+        if len(parts) != 2 or not all(parts):
             return {"status": "error", "error": f"Invalid capability: {capability}"}
 
-        module_name = parts[0]
-        method_name = ".".join(parts[1:])
-
-        module = getattr(self, module_name, None)
+        module_name, method_name = parts
+        # Explicit registry: no blind getattr chains, no nested traversal.
+        modules = {
+            "excel": self.excel,
+            "charts": self.charts,
+            "documents": self.documents,
+            "presentations": self.presentations,
+            "analytics": self.analytics,
+            "pdf": self.pdf,
+            "images": self.images,
+        }
+        module = modules.get(module_name)
         if module is None:
             return {"status": "error", "error": f"Unknown module: {module_name}"}
-
-        method = _resolve_method(module, method_name)
-        if method is None:
+        if method_name.startswith("_"):
             return {"status": "error", "error": f"Unknown capability: {capability}"}
 
+        method = getattr(module, method_name, None)
+        if method is None or not callable(method):
+            return {"status": "error", "error": f"Unknown capability: {capability}"}
+
+        check = validate_params(params, capability)
+        if not check["valid"]:
+            return {"status": "error", "error": check["error"]}
+
         try:
-            result = method(**params)
+            result = _sanitize(method(**params))
+            if not isinstance(result, dict):
+                return {"status": "error",
+                        "error": f"Capability {capability} must return a dict, got {type(result).__name__}"}
             validation = validate_result(result)
             if not validation["valid"]:
                 return {"status": "warning", "data": result, "warnings": validation["warnings"]}
@@ -95,13 +147,3 @@ class PythonEngine:
                         "description": doc,
                     })
         return caps
-
-
-def _resolve_method(module, path: str):
-    """Resolve a dot-separated method path on a module."""
-    current = module
-    for part in path.split("."):
-        current = getattr(current, part, None)
-        if current is None:
-            return None
-    return current if callable(current) else None

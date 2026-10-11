@@ -3,6 +3,7 @@ package ooxml
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/xml"
 	"strings"
 	"testing"
 )
@@ -279,7 +280,9 @@ func TestCellTypeOf(t *testing.T) {
 		{"=SUM(A1:A10)", cellFormula, "SUM(A1:A10)"},
 		{"42", cellNumber, "42"},
 		{"3.14", cellNumber, "3.14"},
-		{"true", cellNumber, "true"},
+		{"true", cellBool, "true"},
+		{"FALSE", cellBool, "false"},
+		{"NaN", cellString, "NaN"},
 	}
 	for _, tt := range tests {
 		typ, val := cellTypeOf(tt.val)
@@ -305,5 +308,307 @@ func TestColName(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("colName(%d) = %q, want %q", tt.n, got, tt.want)
 		}
+	}
+}
+
+// validatePackage mimics the validator: ZIP opens, required parts exist,
+// every XML part is well-formed, and rel targets resolve.
+func validatePackage(t *testing.T, data []byte, required []string) (bool, string) {
+	t.Helper()
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return false, "zip open: " + err.Error()
+	}
+	files := map[string]bool{}
+	for _, f := range zr.File {
+		files[f.Name] = true
+	}
+	for _, name := range required {
+		if !files[name] {
+			return false, "missing part: " + name
+		}
+	}
+	for _, f := range zr.File {
+		if !strings.HasSuffix(f.Name, ".xml") && !strings.HasSuffix(f.Name, ".rels") {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return false, "open " + f.Name + ": " + err.Error()
+		}
+		var buf bytes.Buffer
+		buf.ReadFrom(rc)
+		rc.Close()
+		if buf.Len() == 0 {
+			return false, "empty part: " + f.Name
+		}
+		var v any
+		if err := xml.Unmarshal(buf.Bytes(), &v); err != nil {
+			return false, "malformed " + f.Name + ": " + err.Error()
+		}
+	}
+	if ct, ok := files["[Content_Types].xml"]; !ok || !ct {
+		return false, "missing [Content_Types].xml"
+	}
+	return true, "ok"
+}
+
+func TestRoundTripDOCX(t *testing.T) {
+	data, err := CreateDOCXFromParagraphs([]DocxParagraph{
+		{Text: "Hello & <world>", Size: 24, Bold: true, Align: "center"},
+		{Text: "Second line", Size: 22},
+	})
+	if err != nil {
+		t.Fatalf("CreateDOCXFromParagraphs: %v", err)
+	}
+	ok, detail := validatePackage(t, data, []string{
+		"[Content_Types].xml", "_rels/.rels", "word/document.xml",
+		"word/styles.xml", "docProps/core.xml", "docProps/app.xml",
+	})
+	if !ok {
+		t.Fatalf("round-trip docx invalid: %s", detail)
+	}
+}
+
+func TestRoundTripDOCXTable(t *testing.T) {
+	data, err := CreateDOCXWithTable("Report", TableData{
+		Headers: []string{"Name", "Value"},
+		Rows:    [][]string{{"A", "1"}, {"B"}}, // ragged row must be padded
+	})
+	if err != nil {
+		t.Fatalf("CreateDOCXWithTable: %v", err)
+	}
+	ok, detail := validatePackage(t, data, []string{
+		"[Content_Types].xml", "word/document.xml", "docProps/core.xml",
+	})
+	if !ok {
+		t.Fatalf("round-trip docx table invalid: %s", detail)
+	}
+}
+
+func TestRoundTripXLSX(t *testing.T) {
+	data, err := CreateXLSXFromData("Data", []string{"Name", "Active", "Score"},
+		[][]string{{"A", "true", "9.5"}, {"B", "FALSE", "=SUM(C1:C1)"}})
+	if err != nil {
+		t.Fatalf("CreateXLSXFromData: %v", err)
+	}
+	ok, detail := validatePackage(t, data, []string{
+		"[Content_Types].xml", "xl/workbook.xml", "xl/worksheets/sheet1.xml",
+		"xl/styles.xml", "xl/sharedStrings.xml", "docProps/core.xml",
+	})
+	if !ok {
+		t.Fatalf("round-trip xlsx invalid: %s", detail)
+	}
+	// booleans must use t="b", never a numeric <v>true</v>
+	zr, _ := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	for _, f := range zr.File {
+		if f.Name != "xl/worksheets/sheet1.xml" {
+			continue
+		}
+		rc, _ := f.Open()
+		var buf bytes.Buffer
+		buf.ReadFrom(rc)
+		rc.Close()
+		content := buf.String()
+		if strings.Contains(content, "<v>true</v>") || strings.Contains(content, "<v>false</v>") {
+			t.Error("boolean written as numeric value; want t=\"b\"")
+		}
+		if !strings.Contains(content, `t="b"`) {
+			t.Error("sheet missing boolean cells with t=\"b\"")
+		}
+	}
+}
+
+func TestRoundTripPPTX(t *testing.T) {
+	data, err := CreatePPTXFromSlides([]SlideData{
+		{Title: "Slide 1", Content: "A & B\n<C>"},
+		{Title: "Slide 2"},
+	})
+	if err != nil {
+		t.Fatalf("CreatePPTXFromSlides: %v", err)
+	}
+	ok, detail := validatePackage(t, data, []string{
+		"[Content_Types].xml", "ppt/presentation.xml", "ppt/slides/slide1.xml",
+		"ppt/slides/slide2.xml", "docProps/core.xml", "docProps/app.xml",
+	})
+	if !ok {
+		t.Fatalf("round-trip pptx invalid: %s", detail)
+	}
+}
+
+// docxPart reads one part of a generated DOCX for content assertions.
+func docxPart(t *testing.T, data []byte, name string) string {
+	t.Helper()
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("invalid zip: %v", err)
+	}
+	for _, f := range zr.File {
+		if f.Name == name {
+			rc, err := f.Open()
+			if err != nil {
+				t.Fatalf("open %s: %v", name, err)
+			}
+			var buf bytes.Buffer
+			buf.ReadFrom(rc)
+			rc.Close()
+			return buf.String()
+		}
+	}
+	t.Fatalf("part not found: %s", name)
+	return ""
+}
+
+func TestDocxCorporateStyles(t *testing.T) {
+	data, err := CreateDOCXFromParagraphs([]DocxParagraph{
+		{Text: "Title", Size: 28, Bold: true},
+		{Text: "Body", Size: 22},
+	})
+	if err != nil {
+		t.Fatalf("CreateDOCXFromParagraphs: %v", err)
+	}
+	ok, detail := validatePackage(t, data, []string{
+		"[Content_Types].xml", "_rels/.rels", "word/document.xml",
+		"word/styles.xml", "docProps/core.xml", "docProps/app.xml",
+	})
+	if !ok {
+		t.Fatalf("round-trip docx invalid: %s", detail)
+	}
+	styles := docxPart(t, data, "word/styles.xml")
+	for _, want := range []string{"Heading1", "Heading2", "Heading3", "Normal", "Quote", "1F4E79", "2E75B6"} {
+		if !strings.Contains(styles, want) {
+			t.Errorf("styles.xml missing %q", want)
+		}
+	}
+}
+
+func TestDocxCorporateTable(t *testing.T) {
+	data, err := CreateDOCXWithTable("Report", TableData{
+		Headers: []string{"Name", "Value"},
+		Rows:    [][]string{{"A", "1"}, {"B"}}, // ragged row must be padded
+	})
+	if err != nil {
+		t.Fatalf("CreateDOCXWithTable: %v", err)
+	}
+	ok, detail := validatePackage(t, data, []string{
+		"[Content_Types].xml", "word/document.xml", "docProps/core.xml",
+	})
+	if !ok {
+		t.Fatalf("round-trip docx table invalid: %s", detail)
+	}
+	doc := docxPart(t, data, "word/document.xml")
+	if !strings.Contains(doc, "1F4E79") {
+		t.Error("table header missing corporate blue fill 1F4E79")
+	}
+	if !strings.Contains(doc, "D9E2F3") {
+		t.Error("table body missing banded fill D9E2F3")
+	}
+	// 1 header + 2 body rows, 2 columns each.
+	if got := strings.Count(doc, "<w:tc>"); got != 6 {
+		t.Errorf("table cells = %d, want 6 (ragged row padded)", got)
+	}
+	if !strings.Contains(doc, `w:w="12240"`) {
+		t.Error("sectPr missing letter page size")
+	}
+}
+
+func TestDocxCorporateReport(t *testing.T) {
+	ragged := TableData{Headers: []string{"K", "V"}, Rows: [][]string{{"a", "b"}, {"only"}}}
+	data, err := CreateCorporateReport("Annual Report", CorporateOptions{
+		Subtitle: "FY2026", Date: "October 11, 2026",
+		Header: "ACME", Footer: "Confidential", PageSize: "A4",
+	}, []CorporateSection{
+		{Heading: "Summary", Level: 1, Body: []string{"Growth & <gains>."}, Quote: "Stay the course."},
+		{Heading: "Detail", Level: 2, Body: []string{"Numbers."}, Table: &ragged},
+	})
+	if err != nil {
+		t.Fatalf("CreateCorporateReport: %v", err)
+	}
+	ok, detail := validatePackage(t, data, []string{
+		"[Content_Types].xml", "_rels/.rels", "word/document.xml",
+		"word/styles.xml", "word/header1.xml", "word/footer1.xml",
+		"docProps/core.xml", "docProps/app.xml",
+	})
+	if !ok {
+		t.Fatalf("round-trip corporate report invalid: %s", detail)
+	}
+	doc := docxPart(t, data, "word/document.xml")
+	for _, want := range []string{"Annual Report", "FY2026", "Table of Contents", "TOC ", "Stay the course.", `w:w="11906"`} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("document.xml missing %q", want)
+		}
+	}
+	footer := docxPart(t, data, "word/footer1.xml")
+	if !strings.Contains(footer, "PAGE") {
+		t.Error("footer missing PAGE numbering field")
+	}
+	header := docxPart(t, data, "word/header1.xml")
+	if !strings.Contains(header, "ACME") {
+		t.Error("header missing custom text")
+	}
+	// Letter is the default page size.
+	data, err = CreateCorporateReport("", CorporateOptions{}, nil)
+	if err != nil {
+		t.Fatalf("CreateCorporateReport defaults: %v", err)
+	}
+	if ok, detail := validatePackage(t, data, []string{"word/document.xml"}); !ok {
+		t.Fatalf("round-trip default corporate report invalid: %s", detail)
+	}
+	if doc := docxPart(t, data, "word/document.xml"); !strings.Contains(doc, `w:w="12240"`) {
+		t.Error("default corporate report missing letter page size")
+	}
+}
+// TestCorruptFiles ensures truncated or non-ZIP bytes never validate ok.
+func TestCorruptFiles(t *testing.T) {
+	valid := map[string][]byte{}
+	if d, err := CreateDOCX("T"); err == nil {
+		valid["docx"] = d
+	}
+	if d, err := CreateXLSX("S"); err == nil {
+		valid["xlsx"] = d
+	}
+	if d, err := CreatePPTX("P"); err == nil {
+		valid["pptx"] = d
+	}
+	for ext, data := range valid {
+		truncated := data[:len(data)/2]
+		if ok, _ := validatePackage(t, truncated, []string{"[Content_Types].xml"}); ok {
+			t.Errorf("%s: truncated file validated ok, want invalid", ext)
+		}
+		if ok, _ := validatePackage(t, []byte("not a real "+ext), []string{"[Content_Types].xml"}); ok {
+			t.Errorf("%s: garbage bytes validated ok, want invalid", ext)
+		}
+	}
+}
+
+// TestMalformedXMLDetected breaks one part of a valid DOCX and requires
+// the round-trip check to fail.
+func TestMalformedXMLDetected(t *testing.T) {
+	data, err := CreateDOCX("T")
+	if err != nil {
+		t.Fatalf("CreateDOCX: %v", err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("invalid zip: %v", err)
+	}
+	parts := map[string]string{}
+	for _, f := range zr.File {
+		rc, _ := f.Open()
+		var buf bytes.Buffer
+		buf.ReadFrom(rc)
+		rc.Close()
+		parts[f.Name] = buf.String()
+	}
+	parts["word/document.xml"] = `<?xml version="1.0" encoding="UTF-8"?><w:document><unclosed>`
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	for name, content := range parts {
+		f, _ := w.Create(name)
+		f.Write([]byte(content))
+	}
+	w.Close()
+	if ok, _ := validatePackage(t, buf.Bytes(), []string{"word/document.xml"}); ok {
+		t.Error("malformed document.xml validated ok, want invalid")
 	}
 }
