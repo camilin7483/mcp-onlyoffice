@@ -184,6 +184,11 @@ Create `~/.config/mcp-onlyoffice/config.json`:
 | `storage_path` | `~/mcp-onlyoffice/documents` | Document storage directory |
 | `desktop_path` | (auto-detect) | Path to DesktopEditors binary |
 | `log_level` | `info` | Log level: debug/info/warn/error |
+| `toolset` | `legacy` | `legacy` exposes all 70 tools; `professional` exposes 16 curated document tools. Env: `MCP_ONLYOFFICE_TOOLSET`. |
+
+All registered tools carry MCP annotations (read-only, destructive, idempotent,
+open-world). See `docs/TOOL_PROFILES.md` for the professional catalog and the
+compatibility policy.
 
 ### OpenCode Configuration
 
