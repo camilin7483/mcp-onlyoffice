@@ -17,7 +17,7 @@ MAX_STRING_PARAM_LEN = 4 * 1024 * 1024  # 4 MiB per individual string param (utf
 # Param keys that carry filesystem locations. Any key containing one of
 # these markers (case-insensitive) whose value looks like a path is
 # confined to the allowed output dir (see check_path_confinement).
-PATH_KEY_MARKERS = ("path", "output", "dest", "file", "filename")
+PATH_KEY_MARKERS = ("path", "output", "dest", "file", "filename", "image")
 
 
 def validate_params(params, capability: str = "") -> dict:

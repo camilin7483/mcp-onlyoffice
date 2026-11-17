@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.2] — 2026-11-17
+
+### Reports
+- `documents.create_report` accepts `type: "image"` sections with `path`/`image`
+  and optional `width_inches`; the image is embedded and the path is checked by
+  the Python output-dir confinement. Added Python regression tests.
+
 ## [0.4.1] — 2026-11-17
 
 ### ONLYOFFICE plugin live pairing

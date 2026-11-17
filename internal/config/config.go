@@ -3,10 +3,18 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+)
+
+// Perfiles de herramientas disponibles.
+const (
+	ToolsetLegacy       = "legacy"
+	ToolsetProfessional = "professional"
+	ToolsetEnvVar       = "MCP_ONLYOFFICE_TOOLSET"
 )
 
 type Config struct {
@@ -15,6 +23,7 @@ type Config struct {
 	DesktopPath  string   `json:"desktop_path"`
 	LogLevel     string   `json:"log_level"`
 	AllowedRoots []string `json:"allowed_roots"`
+	Toolset      string   `json:"toolset"`
 }
 
 func Default() *Config {
@@ -26,6 +35,7 @@ func Default() *Config {
 		DesktopPath:  "",
 		LogLevel:     "info",
 		AllowedRoots: nil, // computed from the final StoragePath in EffectiveAllowedRoots
+		Toolset:      ToolsetLegacy,
 	}
 }
 
@@ -54,6 +64,27 @@ func (c *Config) ApplyEnv() {
 		if len(roots) > 0 {
 			c.AllowedRoots = roots
 		}
+	}
+	if v := os.Getenv(ToolsetEnvVar); v != "" {
+		c.Toolset = normalizeToolset(v)
+	}
+}
+
+// EffectiveToolset devuelve el perfil activo, con "legacy" como valor seguro.
+func (c *Config) EffectiveToolset() string {
+	return normalizeToolset(c.Toolset)
+}
+
+// normalizeToolset acepta solo los perfiles conocidos; lo demás cae a legacy.
+func normalizeToolset(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case ToolsetProfessional:
+		return ToolsetProfessional
+	case "", ToolsetLegacy:
+		return ToolsetLegacy
+	default:
+		slog.Warn("unknown toolset, falling back to legacy", "value", v)
+		return ToolsetLegacy
 	}
 }
 

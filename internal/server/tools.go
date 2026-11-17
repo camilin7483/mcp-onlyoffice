@@ -18,40 +18,40 @@ import (
 )
 
 type ToolHandlers struct {
-	store        *storage.LocalStore
-	desktopPath  string
-	bridge       *plugin.Bridge
-	agent        *agent.DocumentAgent
-	wf           *workflow.Engine
-	analyzer     *analyzer.Analyzer
-	validator    *validator.Validator
-	pyBridge     *engine.Bridge
-	planner      *planner.Planner
-	planExec     *planner.ErrorRecovery
-	opMemory     *planner.OperationalMemory
-	improvement  *planner.Improvement
-	cache        *SessionCache
-	registry     *ToolRegistry
+	store       *storage.LocalStore
+	desktopPath string
+	bridge      *plugin.Bridge
+	agent       *agent.DocumentAgent
+	wf          *workflow.Engine
+	analyzer    *analyzer.Analyzer
+	validator   *validator.Validator
+	pyBridge    *engine.Bridge
+	planner     *planner.Planner
+	planExec    *planner.ErrorRecovery
+	opMemory    *planner.OperationalMemory
+	improvement *planner.Improvement
+	cache       *SessionCache
+	registry    *ToolRegistry
 }
 
 func NewToolHandlers(store *storage.LocalStore, desktopPath string, bridge *plugin.Bridge, pyBridge *engine.Bridge, cache *SessionCache, registry *ToolRegistry) *ToolHandlers {
 	agt := agent.New(store)
 	pl := planner.New()
 	return &ToolHandlers{
-		store:        store,
-		desktopPath:  desktopPath,
-		bridge:       bridge,
-		pyBridge:     pyBridge,
-		agent:        agt,
-		wf:           workflow.NewEngine(store, agt),
-		analyzer:     analyzer.New(store),
-		validator:    validator.New(store),
-		planner:      pl,
-		planExec:     planner.NewErrorRecovery(pl.Memory()),
-		opMemory:     pl.Memory(),
-		improvement:  planner.NewImprovement(pl.Memory(), pl.Discovery()),
-		cache:        cache,
-		registry:     registry,
+		store:       store,
+		desktopPath: desktopPath,
+		bridge:      bridge,
+		pyBridge:    pyBridge,
+		agent:       agt,
+		wf:          workflow.NewEngine(store, agt),
+		analyzer:    analyzer.New(store),
+		validator:   validator.New(store),
+		planner:     pl,
+		planExec:    planner.NewErrorRecovery(pl.Memory()),
+		opMemory:    pl.Memory(),
+		improvement: planner.NewImprovement(pl.Memory(), pl.Discovery()),
+		cache:       cache,
+		registry:    registry,
 	}
 }
 
@@ -141,7 +141,7 @@ func (h *ToolHandlers) Definitions() []toolDef {
 		{Name: "disk_usage", Description: "Disk usage: size/file count/dir count.", InputSchema: inputSchema(map[string]any{"path": map[string]any{"type": "string", "desc": "Path (default: cwd)"}}, nil), Handler: h.handleDiskUsage},
 		{Name: "write_markdown", Description: "Write .md file.", InputSchema: inputSchema(map[string]any{"path": map[string]any{"type": "string", "desc": "Full path"}, "content": map[string]any{"type": "string", "desc": "Markdown content"}}, []string{"path"}), Handler: h.handleWriteMarkdown},
 		{Name: "storage_info", Description: "Doc count and total size.", InputSchema: inputSchema(map[string]any{}, nil), Handler: h.handleStorageInfo},
-		{Name: "document_agent", Description: "Create report from description with templates.", InputSchema: inputSchema(map[string]any{"task": map[string]any{"type": "string", "desc": "create_report"}, "title": map[string]any{"type": "string", "desc": "Document title"}, "template": map[string]any{"type": "string", "desc": "business_report/technical_doc/meeting_minutes/proposal"}, "template_params": map[string]any{"type": "object", "desc": "Template params"}, "sections": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{"type": map[string]any{"type": "string", "enum": []string{"text", "table"}}, "heading": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "headers": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "rows": map[string]any{"type": "array", "items": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}}}, "desc": "Sections"}}, []string{"task", "title"}), Handler: h.handleDocumentAgent},
+		{Name: "document_agent", Description: "Create report from description with templates.", InputSchema: inputSchema(map[string]any{"task": map[string]any{"type": "string", "desc": "create_report"}, "title": map[string]any{"type": "string", "desc": "Document title"}, "template": map[string]any{"type": "string", "desc": "business_report/technical_doc/meeting_minutes/proposal"}, "template_params": map[string]any{"type": "object", "desc": "Template params"}, "sections": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{"type": map[string]any{"type": "string", "enum": []string{"text", "table"}}, "heading": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "path": map[string]any{"type": "string", "desc": "Image path inside the output dir"}, "image": map[string]any{"type": "string", "desc": "Alias for path"}, "width_inches": map[string]any{"type": "number"}, "headers": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "rows": map[string]any{"type": "array", "items": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}}}, "desc": "Sections"}}, []string{"task", "title"}), Handler: h.handleDocumentAgent},
 		{Name: "run_workflow", Description: "Run workflow (create_project_package).", InputSchema: inputSchema(map[string]any{"workflow": map[string]any{"type": "string", "desc": "Workflow name"}, "params": map[string]any{"type": "object", "desc": "Params"}}, []string{"workflow"}), Handler: h.handleRunWorkflow},
 		{Name: "list_workflows", Description: "List available workflows.", InputSchema: inputSchema(map[string]any{}, nil), Handler: h.handleListWorkflows},
 		{Name: "list_templates", Description: "List document templates.", InputSchema: inputSchema(map[string]any{}, nil), Handler: h.handleListTemplates},
@@ -153,7 +153,7 @@ func (h *ToolHandlers) Definitions() []toolDef {
 		{Name: "python_engine", Description: "Run Python capability (charts, analytics, Excel, docs, PDF, images).", InputSchema: inputSchema(map[string]any{"capability": map[string]any{"type": "string", "desc": "Capability path"}, "params": map[string]any{"type": "object", "desc": "Capability params"}}, []string{"capability"}), Handler: h.handlePythonEngine},
 		{Name: "planner", Description: "Plan+execute complex task via NL objective.", InputSchema: inputSchema(map[string]any{"objective": map[string]any{"type": "string", "desc": "Task description"}, "params": map[string]any{"type": "object", "desc": "Params"}}, []string{"objective"}), Handler: h.handlePlanner},
 		{Name: "list_capabilities", Description: "List Python engine capabilities.", InputSchema: inputSchema(map[string]any{}, nil), Handler: h.handleListCapabilities},
-		{Name: "create_report", Description: "High-level: create formatted business report (DOCX + XLSX + PPTX).", InputSchema: inputSchema(map[string]any{"title": map[string]any{"type": "string", "desc": "Report title"}, "author": map[string]any{"type": "string", "desc": "Author name"}, "date": map[string]any{"type": "string", "desc": "Date string"}, "sections": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{"type": map[string]any{"type": "string", "enum": []string{"text", "table", "chart"}}, "heading": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "headers": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "rows": map[string]any{"type": "array", "items": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}}}, "desc": "Report sections"}, "output_dir": map[string]any{"type": "string", "desc": "Output directory"}}, []string{"title", "output_dir"}), Handler: h.handleCreateReport},
+		{Name: "create_report", Description: "High-level: create formatted business report (DOCX + XLSX + PPTX).", InputSchema: inputSchema(map[string]any{"title": map[string]any{"type": "string", "desc": "Report title"}, "author": map[string]any{"type": "string", "desc": "Author name"}, "date": map[string]any{"type": "string", "desc": "Date string"}, "sections": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{"type": map[string]any{"type": "string", "enum": []string{"text", "table", "chart", "image"}}, "heading": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "path": map[string]any{"type": "string", "desc": "Image path inside the output dir"}, "image": map[string]any{"type": "string", "desc": "Alias for path"}, "width_inches": map[string]any{"type": "number"}, "headers": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "rows": map[string]any{"type": "array", "items": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}}}, "desc": "Report sections"}, "output_dir": map[string]any{"type": "string", "desc": "Output directory"}}, []string{"title", "output_dir"}), Handler: h.handleCreateReport},
 		{Name: "operational_memory", Description: "Performance stats + task history.", InputSchema: inputSchema(map[string]any{}, nil), Handler: h.handleOperationalMemory},
 		{Name: "discover", Description: "Find capabilities/modules by keyword.", InputSchema: inputSchema(map[string]any{"query": map[string]any{"type": "string", "desc": "Search keyword"}}, nil), Handler: h.handleDiscover},
 		{Name: "self_improve", Description: "Analyze performance and suggest improvements.", InputSchema: inputSchema(map[string]any{}, nil), Handler: h.handleSelfImprove},
