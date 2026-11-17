@@ -189,7 +189,12 @@ class DocumentEngine:
                 if img_path:
                     if not os.path.isfile(img_path):
                         raise FileNotFoundError("image not found: " + str(img_path))
-                    width = float(section_item.get("width_inches", 6.0))
+                    try:
+                        width = float(section_item.get("width_inches", 6.0))
+                    except (TypeError, ValueError):
+                        raise ValueError("width_inches must be a number between 0.5 and 12")
+                    if width < 0.5 or width > 12:
+                        raise ValueError("width_inches must be between 0.5 and 12")
                     picture = doc.add_picture(img_path, width=Inches(width))
                     picture.alignment = WD_ALIGN_PARAGRAPH.CENTER
             quote = section_item.get("quote", "")

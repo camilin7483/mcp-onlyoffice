@@ -177,6 +177,9 @@ def _check_param(key: str, value) -> str | None:
     elif key == "degrees":
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return "must be a number"
+    elif key == "width_inches":
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0.5 or value > 12:
+            return "must be a number between 0.5 and 12"
     elif key in ("data", "values", "categories", "labels", "paths",
                  "x_data", "y_data", "y_series", "x_predict", "rows",
                  "headers", "slides"):

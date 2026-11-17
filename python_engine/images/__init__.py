@@ -10,6 +10,10 @@ Capabilities:
 import os
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
+# Hard cap for decoded images (40 MP): prevents decompression bombs beyond
+# Pillow defaults while allowing normal document/report imagery.
+Image.MAX_IMAGE_PIXELS = 40_000_000
+
 
 class ImageEngine:
     """Reusable image capabilities. NOT a tool — a library."""
