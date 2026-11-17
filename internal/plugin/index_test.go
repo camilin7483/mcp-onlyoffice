@@ -34,13 +34,17 @@ func TestPluginHTMLNoFullDocumentPaste(t *testing.T) {
 			t.Errorf("embedded page must not paste the whole document (found %q)", bad)
 		}
 	}
-	// The only full-content read must feed the match counter, not PasteText.
-	if strings.Count(html, "GetAllContent") != 2 {
-		t.Errorf("GetAllContent appears %d times, want 2 (get_all_content + replace counter)",
+	// Full-content reads feed get_all_content and the before/after match check;
+	// they never feed PasteText.
+	if strings.Count(html, "GetAllContent") != 3 {
+		t.Errorf("GetAllContent appears %d times, want 3 (get + replace before/after)",
 			strings.Count(html, "GetAllContent"))
 	}
 	if !strings.Contains(html, "matches") {
 		t.Error("replace_text must report a match count")
+	}
+	if !strings.Contains(html, "setInterval(ensureConnected") || !strings.Contains(html, "captureApi") {
+		t.Error("plugin must auto-connect and capture Asc.plugin without relying on host init")
 	}
 }
 

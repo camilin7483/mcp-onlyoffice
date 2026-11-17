@@ -176,7 +176,8 @@ function handleCommand(msg) {
       execMethod("GetSelectedText", [], function(res) { sendResponse(id, res); });
       break;
     case "get_all_content":
-      execMethod("GetAllContent", [], function(res) { sendResponse(id, res); });
+      callCommandResult(function() { return Api.GetDocument().GetAllContent(); },
+        function(res) { sendResponse(id, res); });
       break;
     case "insert_text":
       execMethod("PasteText", [params.text || ""], function() { sendResponse(id, "ok"); });
@@ -192,11 +193,14 @@ function handleCommand(msg) {
         var oldT = params.old || "";
         var newT = params.new || "";
         if (!oldT) { sendResponse(id, null, "old text is required"); return; }
-        execMethod("GetAllContent", [], function(content) {
+        callCommandResult(function() { return Api.GetDocument().GetAllContent(); }, function(content) {
           var text = (content === null || content === undefined) ? "" : String(content);
           var matches = text.split(oldT).length - 1;
           execMethod("SearchAndReplace", [{ searchString: oldT, replaceString: newT }], function() {
-            sendResponse(id, { matches: matches });
+            callCommandResult(function() { return Api.GetDocument().GetAllContent(); }, function(after) {
+              var result = (after === null || after === undefined) ? "" : String(after);
+              sendResponse(id, { matches: matches, changed: matches > 0 && result.indexOf(newT) >= 0 });
+            });
           });
         });
       })();
@@ -258,6 +262,21 @@ function execMethod(name, args, cb) {
   }
 }
 
+function callCommandResult(fn, cb) {
+  var api = pluginApi || (typeof Asc !== "undefined" ? Asc.plugin : null);
+  if (!api || typeof api.callCommand !== "function") {
+    console.error("[MCP] plugin API unavailable for callCommand");
+    if (cb) cb(null);
+    return;
+  }
+  try {
+    api.callCommand("(" + fn.toString() + ")();", false, true, cb || function(){});
+  } catch (err) {
+    console.error("[MCP] callCommand error:", err);
+    if (cb) cb(null);
+  }
+}
+
 function callCommand(fn, cb) {
   var api = pluginApi || (typeof Asc !== "undefined" ? Asc.plugin : null);
   if (!api || typeof api.callCommand !== "function") {
@@ -274,15 +293,35 @@ function callCommand(fn, cb) {
   }
 }
 
-Asc.plugin.init = function () {
-  pluginApi = Asc.plugin;
-  console.log("[MCP] plugin init");
-  connect();
-};
+function captureApi() {
+  if (typeof Asc !== "undefined" && Asc && Asc.plugin &&
+      typeof Asc.plugin.executeMethod === "function") {
+    pluginApi = Asc.plugin;
+  }
+  return pluginApi;
+}
 
-Asc.plugin.onDocumentOpen = function () {
-  console.log("[MCP] document opened");
-};
+if (typeof Asc !== "undefined" && Asc && Asc.plugin) {
+  Asc.plugin.init = function () {
+    captureApi();
+    console.log("[MCP] plugin init");
+    connect();
+  };
+  Asc.plugin.onDocumentOpen = function () {
+    console.log("[MCP] document opened");
+  };
+}
+
+// Connect even if the host never calls Asc.plugin.init (background/system
+// plugin); capture the API when it becomes available.
+function ensureConnected() {
+  captureApi();
+  if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+    connect();
+  }
+}
+setTimeout(ensureConnected, 500);
+setInterval(ensureConnected, 5000);
 </script>
 </head>
 <body></body>
