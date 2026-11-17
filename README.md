@@ -8,13 +8,15 @@
 
 ## Features
 
-- **42 MCP tools** organized in 3 progressive tiers
-- **Hardened ZIP handling** — partial-extract on corrupt archives, ZipSlip guard, caps (10MB/file read, 100 files, 200MB total)
+- **70 MCP tools**, all registered at startup (tiers are grouping metadata, not deferred loading)
+- **Hardened ZIP handling** — partial-extract on corrupt archives, ZipSlip and symlink-entry rejection, caps (1000 entries, 256 MiB uncompressed, 1000 sources)
+- **Filesystem sandbox** — every fs/document tool resolves through allowed roots (symlink-aware), refuses silent overwrites (`.bak-` backup with `overwrite=true`), requires `recursive=true` to delete directories, audit JSONL
+- **Bridge authentication** — per-launch token in `~/.config/mcp-onlyoffice/bridge-token`, origin allowlist, `/pair` + `/ping` discovery, single active plugin client, 1 MiB frame limit
 - **Storage guardrails** — `MaxDocBytes` 10MB cap on document payloads
-- **Pinned Python deps** — `==` pins (openpyxl 3.1.5, python-docx 1.2.0, python-pptx 1.0.2, matplotlib 3.11.0, numpy 2.5.2, Pillow 12.3.0)
+- **Pinned Python deps** — `==` pins (openpyxl 3.1.5, python-docx 1.2.0, python-pptx 1.0.2, matplotlib 3.11.0, numpy 2.5.2, Pillow 13.0.0)
 - **OOXML native generator (no repair)** — ordered ZIP, docProps, sectPr, `t=b`, dimension, clrMap — opens clean in ONLYOFFICE/LibreOffice
 - **OOXML validator** — checks ZIP/XML/content_types/rels/metadata with 0–100 score
-- **Hardened engine bridge** — 120s timeout, capability allowlist, no traceback leaked to client
+- **Hardened engine bridge** — 120s timeout, request IDs echoed and validated, SIGKILL + lazy restart on timeout/cancel (outcome marked unknown, never silently retried), capability allowlist, Python output-path confinement, no traceback leaked to client
 - **New Python caps** — `excel.formulas`/`conditional`/`embed`, charts at DPI 150 (seaborn), 8-slide blue 16:9 decks + speaker notes, PDF cover + pagination + metadata
 - **Smarter planner** — per-step `expandReport`, persistent cache with deep-copy, `ExecutePlan` retry with alternative capability
 - **Workflow `batch_create`** + **agent `mail_merge`** (all record IDs returned)
@@ -49,7 +51,7 @@
 │  ┌─────────────────┐   ┌──────────────────────────┐     │
 │  │  cmd/           │   │  internal/server/         │     │
 │  │  main.go        │──▶│  - server.go (MCP)       │     │
-│  │  (entry point)  │   │  - tools.go (42 tools)   │     │
+│  │  (entry point)  │   │  - tools.go (70 tools)   │     │
 │  └─────────────────┘   │  - *handlers.go          │     │
 │                        │  - discovery.go (tiers)  │     │
 │                        │  - cache.go              │     │
@@ -239,7 +241,7 @@ Once connected, try these with your AI assistant:
 
 ## Tool Reference
 
-### Tier 1 — Essential (loaded at startup)
+### Tier 1 — Essential (grouping metadata; every tier is registered at startup)
 
 | Tool | Description | Input |
 |------|-------------|-------|
@@ -391,7 +393,7 @@ mcp-onlyoffice/
 │   │   └── index.go             # Plugin files installer
 │   ├── server/
 │   │   ├── server.go            # MCP server core
-│   │   ├── tools.go              # 42 tool definitions
+│   │   ├── tools.go              # 70 tool definitions
 │   │   ├── doc_handlers.go      # Document creation handlers
 │   │   ├── plugin_handlers.go   # Plugin interaction handlers
 │   │   ├── engine_handlers.go   # Python engine + planner handlers
@@ -498,15 +500,22 @@ Based on the development plan in `system_prompt_mcp_onlyoffice_v2.md`:
 | 8. Validator | ✅ Done | `internal/validator/` (ZIP/XML/content_types/rels/metadata, 0–100 score) |
 | 9. Cross-Doc References | ✅ Done | `add_document_reference` |
 | 10. Observability | ✅ Done | `jsonError` envelope, JSONL audit log, `MCP_ONLYOFFICE_LOG_LEVEL` |
-| 11. Testing | ✅ Done | `go test` ooxml/validator/planner/workflow/storage pass |
+| 11. Testing | ✅ Partial | ooxml/validator/planner/workflow/storage/server/plugin/engine/audit covered; agent/analyzer/templates still have no dedicated tests |
 | 12. Performance Refactor | ✅ Done | Hardened engine bridge (120s timeout + allowlist, no traceback leak), planner persistent deep-copy cache + retry |
 
 ---
 
 ## Known Issues
 
-- **ONLYOFFICE plugin**: Requires Desktop Editors installed and running
-- **tools.go**: File exceeds 800 lines — candidate for future split into separate files
+- **ONLYOFFICE plugin**: requires Desktop Editors running with the plugin installed; the first
+  connection needs a plugin reload so it can read the new `/pair` token.
+- **Plugin port fallback**: if the configured port is taken, the server may bind another port
+  up to `port+49`; the plugin scans that range, but a random fallback outside it is not
+  discoverable by design.
+- **`replace_text`**: uses the plugin's `SearchAndReplace`; it reports a real match count but
+  has not been exercised inside a live Desktop Editors session in this environment.
+- **GLPI REST v2**: detected but not implemented; only the legacy `apirest.php` API is supported.
+- **tools.go**: file exceeds 800 lines — candidate for a future split.
 
 ## Pack Q3 v2 + Validation
 

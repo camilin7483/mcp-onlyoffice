@@ -60,14 +60,19 @@ func (c *Config) ApplyEnv() {
 // EffectiveAllowedRoots returns the configured roots, defaulting to the
 // storage directory plus the current working directory.
 func (c *Config) EffectiveAllowedRoots() []string {
-	if len(c.AllowedRoots) > 0 {
-		return append([]string(nil), c.AllowedRoots...)
+	roots := c.AllowedRoots
+	if len(roots) == 0 {
+		roots = []string{c.StoragePath}
 	}
-	roots := []string{c.StoragePath}
-	if cwd, err := os.Getwd(); err == nil && cwd != "" {
-		roots = append(roots, cwd)
+	out := make([]string, 0, len(roots))
+	for _, r := range roots {
+		r = strings.TrimSpace(r)
+		if r == "" || filepath.Clean(r) == string(os.PathSeparator) {
+			continue
+		}
+		out = append(out, r)
 	}
-	return roots
+	return out
 }
 
 func Load(path string) (*Config, error) {

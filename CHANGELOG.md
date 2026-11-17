@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] — 2026-11-17
+
+### Security / Hardening
+- Plugin bridge: per-launch token (`~/.config/mcp-onlyoffice/bridge-token`, 0600), origin
+  allowlist (no website origins), `/pair` bootstrap and `/ping` discovery, single active
+  client, 1 MiB read limit, request cap, honest send failures, random-port fallback logged.
+- `replace_text`: real `SearchAndReplace` with match count; no full-document paste; Go handler
+  propagates `{ok,matches}`.
+- Filesystem: all fs/document writers resolve through allowed roots with symlink checks;
+  overwrite requires `overwrite=true` and creates `.bak-YYYYMMDDHHMMSS`; recursive delete
+  requires `recursive=true`; zip-slip/absolute/symlink entries rejected; 32 MiB read /
+  64 MiB write / 1000-entry / 256 MiB caps; JSONL audit.
+- Python engine: SIGKILL + lazy restart on timeout/cancel, echoed request ids, no automatic
+  retry of unknown outcomes, output-dir confinement, 8 MiB request cap.
+- Config: allowed roots derive from the final storage path (env/config no longer leave stale
+  default roots enabled).
+
+### Tests
+- New bridge, filesystem, engine-bridge, plugin and python confinement suites; `go test ./...`
+  and `python3 -m unittest test_confinement` green.
+
 ## [0.3.0] — UNRELEASED
 
 ### Security / Hardening

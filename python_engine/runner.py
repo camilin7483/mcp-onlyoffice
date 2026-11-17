@@ -83,6 +83,16 @@ def main():
 
     engine = PythonEngine()
 
+    # All relative paths validated by the engine are resolved against this
+    # output dir; chdir once so the capability modules cannot write elsewhere.
+    out_dir = output_dir_from_env()
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        os.chdir(out_dir)
+    except OSError as exc:
+        sys.stderr.write(f"cannot use output dir {out_dir}: {exc}\n")
+        sys.exit(1)
+
     # Use line-buffered stdout for reliable IPC.
     # This ensures each response line is flushed immediately.
     stdout = sys.stdout

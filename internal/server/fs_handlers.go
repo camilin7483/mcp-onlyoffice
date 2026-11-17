@@ -203,7 +203,7 @@ func ensureWritable(resolved, action string, args map[string]any) (string, *mcp.
 		return "", textError("backup read: " + err.Error())
 	}
 	bak := resolved + ".bak-" + storage.BackupTimestamp()
-	if err := os.WriteFile(bak, data, 0644); err != nil {
+	if err := os.WriteFile(bak, data, 0600); err != nil {
 		return "", textError("backup write: " + err.Error())
 	}
 	auditLog(action, resolved, "ok", map[string]any{"backup": bak})

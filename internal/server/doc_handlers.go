@@ -290,10 +290,6 @@ func (h *ToolHandlers) handleWritePresentation(ctx context.Context, args map[str
 	if err != nil {
 		return textError("create presentation: " + err.Error()), nil
 	}
-	resolved, bad = h.prepareWrite(path, args["overwrite"] == true)
-	if bad != nil {
-		return bad, nil
-	}
 	if err := os.WriteFile(resolved, data, 0o644); err != nil {
 		return textError("write file: " + err.Error()), nil
 	}

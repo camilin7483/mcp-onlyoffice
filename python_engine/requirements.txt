@@ -20,4 +20,4 @@ fpdf2==2.7.0
 PyPDF2==3.0.0
 
 # Images
-Pillow==12.3.0
+Pillow==13.0.0
