@@ -6,7 +6,10 @@ import (
 	"path/filepath"
 )
 
-const pluginGUID = "asc.MCP-Bridge"
+const pluginGUID = "asc.{B0A5F3C2-6A5D-4F0B-9D71-2C3B4E5F6071}"
+
+// Desktop Editors loads <guid-without-asc-prefix>/index.html.
+const pluginFolder = "{B0A5F3C2-6A5D-4F0B-9D71-2C3B4E5F6071}"
 
 // pluginVersion must match BridgeVersion and the MCP server version.
 const pluginVersion = "2.0.0"
@@ -16,7 +19,7 @@ func PluginDir() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("home dir: %w", err)
 	}
-	return filepath.Join(home, ".local", "share", "onlyoffice", "desktopeditors", "sdkjs-plugins", pluginGUID), nil
+	return filepath.Join(home, ".local", "share", "onlyoffice", "desktopeditors", "sdkjs-plugins", pluginFolder), nil
 }
 
 func InstallPluginFiles() error {
@@ -75,6 +78,7 @@ func pluginIndexHTML() string {
 <meta charset="utf-8">
 <script>
 let ws = null;
+let pluginApi = null; // captured at init; the host may clear the global afterwards
 let portOffset = 0;
 let backoffMs = 1000;
 const PORT_START = 2021;
@@ -240,8 +244,14 @@ function handleCommand(msg) {
 }
 
 function execMethod(name, args, cb) {
+  var api = pluginApi || (typeof Asc !== "undefined" ? Asc.plugin : null);
+  if (!api || typeof api.executeMethod !== "function") {
+    console.error("[MCP] plugin API unavailable for " + name);
+    if (cb) cb(null);
+    return;
+  }
   try {
-    Asc.plugin.executeMethod(name, args, cb || function(){});
+    api.executeMethod(name, args, cb || function(){});
   } catch (err) {
     console.error("[MCP] executeMethod error:", err);
     if (cb) cb(null);
@@ -249,9 +259,15 @@ function execMethod(name, args, cb) {
 }
 
 function callCommand(fn, cb) {
+  var api = pluginApi || (typeof Asc !== "undefined" ? Asc.plugin : null);
+  if (!api || typeof api.callCommand !== "function") {
+    console.error("[MCP] plugin API unavailable for callCommand");
+    if (cb) cb();
+    return;
+  }
   try {
     var s = fn.toString();
-    Asc.plugin.callCommand("(" + s + ")(function(){});", false, true, cb || function(){});
+    api.callCommand("(" + s + ")(function(){});", false, true, cb || function(){});
   } catch (err) {
     console.error("[MCP] callCommand error:", err);
     if (cb) cb();
@@ -259,6 +275,7 @@ function callCommand(fn, cb) {
 }
 
 Asc.plugin.init = function () {
+  pluginApi = Asc.plugin;
   console.log("[MCP] plugin init");
   connect();
 };

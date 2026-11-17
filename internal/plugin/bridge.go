@@ -178,6 +178,11 @@ func (b *Bridge) handler() http.Handler {
 // handlePing identifies this process to the plugin scanner. No auth and no
 // secrets: it only lets the plugin verify it reached the right process.
 func (b *Bridge) handlePing(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -189,6 +194,12 @@ func (b *Bridge) handlePing(w http.ResponseWriter, r *http.Request) {
 // reachable from loopback with no browser-page Origin (websites always send
 // their own Origin and get 403).
 func (b *Bridge) handlePair(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,OPTIONS")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -201,6 +212,9 @@ func (b *Bridge) handlePair(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "pairing refused for browser page origin", http.StatusForbidden)
 		return
 	}
+	// The plugin runs inside a file:// / null-origin iframe; without this the
+	// browser blocks reading the token even though pairing is allowed.
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	writeJSON(w, map[string]any{"token": b.token, "port": b.realPort, "app": AppName})
 }
 
@@ -219,6 +233,10 @@ func allowedWSOrigin(origin string) bool {
 	if origin == "file://" || strings.HasPrefix(origin, "file://") {
 		return true
 	}
+	// Desktop Editors plugin webview (privileged local origin).
+	if strings.HasPrefix(origin, "onlyoffice://plugin") {
+		return true
+	}
 	u, err := url.Parse(origin)
 	if err != nil {
 		return false
@@ -233,7 +251,8 @@ func allowedWSOrigin(origin string) bool {
 // with no Origin, "null", or file:// only.
 func allowedPairOrigin(origin string) bool {
 	return origin == "" || origin == "null" ||
-		origin == "file://" || strings.HasPrefix(origin, "file://")
+		origin == "file://" || strings.HasPrefix(origin, "file://") ||
+		strings.HasPrefix(origin, "onlyoffice://plugin")
 }
 
 func isLoopbackHost(hostport string) bool {
@@ -265,7 +284,9 @@ func (b *Bridge) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid or missing token", http.StatusUnauthorized)
 		return
 	}
-	c, err := websocket.Accept(w, r, nil)
+	// Origin was already validated above; skip the library's host-based check,
+	// which rejects Desktop Editors' custom "onlyoffice://plugin" origin.
+	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
 		slog.Warn("websocket accept", "error", err)
 		return

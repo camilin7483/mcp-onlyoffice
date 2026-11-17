@@ -95,7 +95,7 @@ func TestTokenPersistedWith0600(t *testing.T) {
 func TestAllowedWSOrigin(t *testing.T) {
 	accept := []string{"", "null", "file://", "file:///index.html",
 		"http://127.0.0.1:2021", "https://127.0.0.1", "http://localhost:3000",
-		"https://localhost", "http://[::1]:2021"}
+		"https://localhost", "http://[::1]:2021", "onlyoffice://plugin"}
 	for _, o := range accept {
 		if !allowedWSOrigin(o) {
 			t.Errorf("origin %q should be accepted", o)
@@ -166,7 +166,7 @@ func TestPairOriginRules(t *testing.T) {
 		}
 		return res.StatusCode
 	}
-	for _, o := range []string{"", "null", "file://", "file:///index.html"} {
+	for _, o := range []string{"", "null", "file://", "file:///index.html", "onlyoffice://plugin"} {
 		if code := get(o); code != http.StatusOK {
 			t.Errorf("origin %q: status = %d, want 200", o, code)
 		}

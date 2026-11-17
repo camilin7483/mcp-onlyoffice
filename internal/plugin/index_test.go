@@ -51,7 +51,7 @@ func TestManifestVersionAndGUID(t *testing.T) {
 		t.Fatalf("InstallPluginFiles: %v", err)
 	}
 	raw, err := os.ReadFile(filepath.Join(home, ".local", "share", "onlyoffice",
-		"desktopeditors", "sdkjs-plugins", pluginGUID, "config.json"))
+		"desktopeditors", "sdkjs-plugins", pluginFolder, "config.json"))
 	if err != nil {
 		t.Fatalf("read config.json: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestManifestVersionAndGUID(t *testing.T) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("decode config.json: %v", err)
 	}
-	if cfg["guid"] != pluginGUID || pluginGUID != "asc.MCP-Bridge" {
+	if cfg["guid"] != pluginGUID || !strings.HasPrefix(pluginGUID, "asc.{") {
 		t.Fatalf("GUID changed: %v", cfg["guid"])
 	}
 	if cfg["version"] != BridgeVersion || BridgeVersion != "2.0.0" {

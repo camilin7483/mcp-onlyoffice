@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.1] — 2026-11-17
+
+### ONLYOFFICE plugin live pairing
+- Fixed plugin manifest GUID/folder layout: Desktop Editors loads
+  `sdkjs-plugins/<guid-without-asc.>/index.html`. The plugin now installs as
+  `asc.{UUID}` config inside `{UUID}` folder.
+- `/ping` and `/pair` send CORS headers; WebSocket accepts the privileged
+  `onlyoffice://plugin` (and its bare `plugin` Origin) after token/origin checks.
+- Plugin captures the `Asc.plugin` API at init so document commands keep working
+  if the host removes the global afterwards.
+- Verified live: Desktop Editors 8.x under Xvfb loads the plugin, pairs and opens
+  the authenticated WebSocket on port 2021.
+
 ## [0.4.0] — 2026-11-17
 
 ### Security / Hardening
