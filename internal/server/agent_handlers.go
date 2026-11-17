@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/cam/mcp-onlyoffice/internal/agent"
+	"github.com/cam/mcp-onlyoffice/internal/storage"
 	"github.com/cam/mcp-onlyoffice/internal/templates"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -211,7 +212,11 @@ func (h *ToolHandlers) handleCreateReport(ctx context.Context, args map[string]a
 	}
 	sectionsRaw, _ := args["sections"].([]any)
 
-	safeDir := filepath.Join(outputDir, sanitizeFilename(title))
+	resolvedDir, err := storage.ResolveDest(outputDir, h.effectiveRoots())
+	if err != nil {
+		return jsonError(err.Error()), nil
+	}
+	safeDir := filepath.Join(resolvedDir, sanitizeFilename(title))
 	docxPath := filepath.Join(safeDir, title+".docx")
 	xlsxPath := filepath.Join(safeDir, title+".xlsx")
 	pptxPath := filepath.Join(safeDir, title+".pptx")

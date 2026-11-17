@@ -6,22 +6,26 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
-	PluginPort  int    `json:"plugin_port"`
-	StoragePath string `json:"storage_path"`
-	DesktopPath string `json:"desktop_path"`
-	LogLevel    string `json:"log_level"`
+	PluginPort   int      `json:"plugin_port"`
+	StoragePath  string   `json:"storage_path"`
+	DesktopPath  string   `json:"desktop_path"`
+	LogLevel     string   `json:"log_level"`
+	AllowedRoots []string `json:"allowed_roots"`
 }
 
 func Default() *Config {
 	home, _ := os.UserHomeDir()
+	storage := filepath.Join(home, "mcp-onlyoffice", "documents")
 	return &Config{
-		PluginPort:  2021,
-		StoragePath: filepath.Join(home, "mcp-onlyoffice", "documents"),
-		DesktopPath: "",
-		LogLevel:    "info",
+		PluginPort:   2021,
+		StoragePath:  storage,
+		DesktopPath:  "",
+		LogLevel:     "info",
+		AllowedRoots: nil, // computed from the final StoragePath in EffectiveAllowedRoots
 	}
 }
 
@@ -40,6 +44,30 @@ func (c *Config) ApplyEnv() {
 	if v := os.Getenv("MCP_ONLYOFFICE_LOG_LEVEL"); v != "" {
 		c.LogLevel = v
 	}
+	if v := os.Getenv("MCP_ONLYOFFICE_ALLOWED_ROOTS"); v != "" {
+		var roots []string
+		for _, r := range strings.Split(v, ":") {
+			if r = strings.TrimSpace(r); r != "" {
+				roots = append(roots, r)
+			}
+		}
+		if len(roots) > 0 {
+			c.AllowedRoots = roots
+		}
+	}
+}
+
+// EffectiveAllowedRoots returns the configured roots, defaulting to the
+// storage directory plus the current working directory.
+func (c *Config) EffectiveAllowedRoots() []string {
+	if len(c.AllowedRoots) > 0 {
+		return append([]string(nil), c.AllowedRoots...)
+	}
+	roots := []string{c.StoragePath}
+	if cwd, err := os.Getwd(); err == nil && cwd != "" {
+		roots = append(roots, cwd)
+	}
+	return roots
 }
 
 func Load(path string) (*Config, error) {

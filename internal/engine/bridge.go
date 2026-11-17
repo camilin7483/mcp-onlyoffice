@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -17,26 +19,64 @@ import (
 
 // DefaultEngineTimeout bounds every request to the Python engine.
 // Override per-bridge via the Timeout field.
+//
+// NOTE: a timeout means the request outcome is UNKNOWN — the Python side
+// may or may not have executed the operation. The bridge SIGKILLs the
+// subprocess on timeout, so callers must NOT blindly retry side-effecting
+// capabilities; surface the OutcomeUnknownError to the tool layer instead.
 const DefaultEngineTimeout = 120 * time.Second
 
-// capabilityPattern is the allowlist: "module.method" in dot notation,
-// plus the internal "__list__" and "__version__" commands.
-// Anything else (paths, shell metachars, spaces) is rejected before IPC.
-var capabilityPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`)
+// MaxResponseSize caps a single response line from the engine (64 MiB).
+// Oversized lines are rejected and the engine is killed to resync the
+// JSON-lines stream.
+const MaxResponseSize = 64 << 20
+
+// killWaitTimeout bounds how long we wait for a killed process to be reaped.
+const killWaitTimeout = 5 * time.Second
+
+// capabilityPattern is the allowlist: exactly "module.method" in dot notation,
+// plus the internal "__list__" and "__version__" commands. Nested paths like
+// "a.b.c", filesystem paths, shell metachars and spaces are rejected before
+// IPC. This mirrors the Python engine, which accepts exactly two segments.
+var capabilityPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$`)
+
+// OutcomeUnknownError reports that a request may or may not have executed:
+// the bridge killed the subprocess on timeout/cancellation instead of
+// waiting for the answer. Do NOT automatically retry side-effecting
+// operations; let the caller/operator decide.
+type OutcomeUnknownError struct {
+	Capability string
+	Err        error
+}
+
+func (e *OutcomeUnknownError) Error() string {
+	return fmt.Sprintf("capability %q outcome unknown (engine killed, it may or may not have executed): %v", e.Capability, e.Err)
+}
+
+func (e *OutcomeUnknownError) Unwrap() error { return e.Err }
+
+// IsOutcomeUnknown reports whether err signals an unknown request outcome.
+func IsOutcomeUnknown(err error) bool {
+	var unknown *OutcomeUnknownError
+	return errors.As(err, &unknown)
+}
 
 // Request is sent to the Python Engine via stdin.
+// The id correlates responses; the runner echoes it back verbatim.
 type Request struct {
+	ID         uint64         `json:"id"`
 	Capability string         `json:"capability"`
 	Params     map[string]any `json:"params"`
 }
 
 // Response is received from the Python Engine via stdout.
 type Response struct {
-	Status    string `json:"status"`
-	Data      any    `json:"data,omitempty"`
-	Error     string `json:"error,omitempty"`
-	Traceback string `json:"traceback,omitempty"`
-	Warnings  any    `json:"warnings,omitempty"`
+	ID        *uint64 `json:"id,omitempty"`
+	Status    string  `json:"status,omitempty"`
+	Data      any     `json:"data,omitempty"`
+	Error     string  `json:"error,omitempty"`
+	Traceback string  `json:"traceback,omitempty"`
+	Warnings  any     `json:"warnings,omitempty"`
 }
 
 // CapabilityInfo describes a capability from the engine.
@@ -49,8 +89,11 @@ type CapabilityInfo struct {
 // It follows the principle: MCP coordinates, Python Engine executes.
 //
 // The Bridge maintains a persistent Python subprocess and communicates
-// via newline-delimited JSON over stdin/stdout. If the subprocess dies,
-// the Bridge automatically restarts it (lazy restart on next Execute).
+// via newline-delimited JSON over stdin/stdout. On timeout, cancellation
+// after write, or protocol errors the subprocess is SIGKILLed and marked
+// dead; the next Execute lazily restarts it with a fresh process and a
+// fresh reader, so a late answer from the old process can never be matched
+// to a later request. The same request is never re-sent automatically.
 type Bridge struct {
 	mu           sync.Mutex
 	enginePath   string
@@ -60,15 +103,14 @@ type Bridge struct {
 	cmd          *exec.Cmd
 	stdin        io.WriteCloser
 	stdout       *bufio.Reader
+	stdoutPipe   io.ReadCloser
+	waitCh       chan struct{} // closed when the subprocess exits
 	cancel       context.CancelFunc
+	nextID       uint64 // monotonic request ids, never reset (survives restarts)
+	// OutputDir confines Python-side file writes (empty keeps the default cwd).
+	OutputDir string
 	// Timeout bounds each Execute call. Zero means DefaultEngineTimeout.
-	//
-	// NOTE: on timeout the reader goroutine blocked in ReadString is NOT
-	// killed — it stays parked until the next response line arrives on
-	// stdout or the process dies (channel is buffered with cap 1, so at
-	// most one zombie goroutine per timed-out call; it is reaped on the
-	// next successful read or process restart). If this ever matters,
-	// kill and restart the subprocess on timeout instead of reusing it.
+	// A timeout kills the engine and returns OutcomeUnknownError.
 	Timeout time.Duration
 }
 
@@ -110,18 +152,27 @@ func (b *Bridge) startLocked(ctx context.Context) error {
 	if b.initialized && b.processAlive() {
 		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("not starting python engine (context done): %w", err)
+	}
 
 	// Clean up any previous state.
-	b.stopLocked()
+	b.killLocked()
 
 	runnerPath := b.runnerPath()
 	if runnerPath == "" {
 		return fmt.Errorf("empty engine path: set Bridge enginePath to the python_engine directory or runner.py")
 	}
 
-	engCtx, cancel := context.WithCancel(ctx)
+	// The engine lifetime is managed solely by killLocked/Stop, never by a
+	// caller request context: deriving from ctx would kill the shared
+	// process when an unrelated request context is cancelled.
+	engCtx, cancel := context.WithCancel(context.Background())
 	// No shell is involved: argv is [python, runner.py] executed directly.
 	cmd := exec.CommandContext(engCtx, b.pythonCmd, runnerPath)
+	if b.OutputDir != "" {
+		cmd.Env = append(os.Environ(), "MCP_ONLYOFFICE_ENGINE_OUTPUT_DIR="+b.OutputDir)
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -146,9 +197,17 @@ func (b *Bridge) startLocked(ctx context.Context) error {
 		return fmt.Errorf("start python engine (%s %s): %w (hint: install python3 and run: pip install -r python_engine/requirements.txt)", b.pythonCmd, runnerPath, err)
 	}
 
+	waitCh := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(waitCh)
+	}()
+
 	b.cmd = cmd
 	b.stdin = stdin
+	b.stdoutPipe = stdout
 	b.stdout = bufio.NewReaderSize(stdout, 1024*1024) // 1MB read buffer
+	b.waitCh = waitCh
 	b.cancel = cancel
 
 	// Log stderr line by line in the background (non-blocking).
@@ -164,15 +223,6 @@ func (b *Bridge) startLocked(ctx context.Context) error {
 	}()
 
 	b.initialized = true
-
-	// Wait for the process to exit and mark as uninitialized.
-	go func() {
-		_ = cmd.Wait()
-		b.mu.Lock()
-		b.initialized = false
-		b.mu.Unlock()
-		slog.Debug("python engine process exited")
-	}()
 
 	// List capabilities to verify the engine is responsive.
 	caps, err := b.listCapabilitiesLocked(engCtx)
@@ -203,10 +253,8 @@ func validateCapability(capability string) error {
 	if capabilityPattern.MatchString(capability) {
 		return nil
 	}
-	return fmt.Errorf("rejected capability %q: must match \"module.method\" with lowercase letters, digits, underscores (e.g. \"excel.create_workbook\")", capability)
+	return fmt.Errorf("rejected capability %q: must be exactly \"module.method\" with lowercase letters, digits, underscores (e.g. \"excel.create_workbook\")", capability)
 }
-
-// processAlive checks whether the Python subprocess is still running.
 
 // timeout returns the effective per-request timeout.
 func (b *Bridge) timeout() time.Duration {
@@ -215,9 +263,17 @@ func (b *Bridge) timeout() time.Duration {
 	}
 	return DefaultEngineTimeout
 }
+
+// processAlive checks whether the Python subprocess is still running.
+// Caller must hold b.mu.
 func (b *Bridge) processAlive() bool {
-	if b.cmd == nil || b.cmd.Process == nil {
+	if !b.initialized || b.cmd == nil || b.cmd.Process == nil {
 		return false
+	}
+	select {
+	case <-b.waitCh:
+		return false
+	default:
 	}
 	// On Unix, sending signal 0 checks process existence without killing it.
 	if err := b.cmd.Process.Signal(syscall.Signal(0)); err != nil {
@@ -227,22 +283,31 @@ func (b *Bridge) processAlive() bool {
 }
 
 // ensureAlive restarts the Python subprocess if it has died.
+// It never spawns a new process when ctx is already done.
 // Caller must hold b.mu.
 func (b *Bridge) ensureAlive(ctx context.Context) error {
 	if b.initialized && b.processAlive() {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("engine not running and context done (not restarting): %w", err)
 	}
 	slog.Info("python engine dead, restarting...")
 	return b.startLocked(ctx)
 }
 
 // Execute sends a capability request to the Python Engine and returns the response.
-// If the Python subprocess has died, it is automatically restarted before retrying.
 //
 // The mutex covers the whole write+read cycle on purpose: the subprocess
 // speaks lock-step JSON-lines over a single stdin/stdout pair, so two
 // interleaved writes would scramble responses. For concurrent execution
 // use EnginePool (one Bridge per process), not parallel Execute on one Bridge.
+//
+// The request is sent at most once: on timeout, cancellation, or transport
+// errors the engine is killed and the error is returned WITHOUT retrying,
+// because a retry could duplicate side effects. The next Execute lazily
+// restarts with a fresh process. A timeout/cancellation error is an
+// *OutcomeUnknownError: the operation may or may not have executed.
 func (b *Bridge) Execute(ctx context.Context, capability string, params map[string]any) (*Response, error) {
 	if err := validateCapability(capability); err != nil {
 		return nil, err
@@ -250,9 +315,19 @@ func (b *Bridge) Execute(ctx context.Context, capability string, params map[stri
 	if params == nil {
 		params = map[string]any{}
 	}
+	// Never spawn or restart the engine for an already-done context.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("capability %q not sent (context done before write): %w", capability, err)
+	}
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	// Re-check after acquiring the lock: the context may have been
+	// cancelled while waiting, and the write below must not happen then.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("capability %q not sent (context done before write): %w", capability, err)
+	}
 
 	// Ensure the engine is alive (restart if needed).
 	if err := b.ensureAlive(ctx); err != nil {
@@ -260,16 +335,6 @@ func (b *Bridge) Execute(ctx context.Context, capability string, params map[stri
 	}
 
 	resp, err := b.executeLocked(ctx, capability, params)
-	if err != nil {
-		// If the write or read failed, the process is likely dead.
-		// Restart and retry once.
-		slog.Warn("engine call failed, restarting and retrying",
-			"capability", capability, "error", err)
-		if restartErr := b.startLocked(ctx); restartErr != nil {
-			return nil, fmt.Errorf("engine restart after failure (capability %q): %w", capability, restartErr)
-		}
-		resp, err = b.executeLocked(ctx, capability, params)
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -279,10 +344,15 @@ func (b *Bridge) Execute(ctx context.Context, capability string, params map[stri
 	if resp.Status == "error" && resp.Error == "" {
 		resp.Error = fmt.Sprintf("capability %q failed without detail; check engine stderr logs", capability)
 	}
-	return resp, err
+	return resp, nil
 }
 
-// executeLocked performs a single request-response cycle.
+type readResult struct {
+	line string
+	err  error
+}
+
+// executeLocked performs a single request-response cycle, exactly once.
 // Never invokes a shell: the Python interpreter is exec'd directly with
 // runner.py as argv (no sh -c), so capability/params cannot inject commands.
 // Caller must hold b.mu.
@@ -290,7 +360,13 @@ func (b *Bridge) executeLocked(ctx context.Context, capability string, params ma
 	if params == nil {
 		params = map[string]any{}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("capability %q not sent (context done before write): %w", capability, err)
+	}
+	b.nextID++
+	id := b.nextID
 	req := Request{
+		ID:         id,
 		Capability: capability,
 		Params:     params,
 	}
@@ -300,49 +376,118 @@ func (b *Bridge) executeLocked(ctx context.Context, capability string, params ma
 		return nil, fmt.Errorf("marshal request for capability %q: %w (hint: params must be JSON-serializable)", capability, err)
 	}
 
-	// Write the request line to stdin.
-	if _, err := fmt.Fprintln(b.stdin, string(data)); err != nil {
-		return nil, fmt.Errorf("write capability %q to engine: %w (hint: engine may have crashed; check stderr logs)", capability, err)
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("capability %q not sent (context done before write): %w", capability, err)
 	}
-
-	// Read the response line from stdout.
-	type respResult struct {
-		resp *Response
-		err  error
-	}
-
-	ch := make(chan respResult, 1)
-	go func() {
-		line, readErr := b.stdout.ReadString('\n')
-		if readErr != nil && line == "" {
-			ch <- respResult{nil, fmt.Errorf("engine closed during capability %q: %w (hint: runner.py crashed; check stderr logs)", capability, readErr)}
-			return
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			ch <- respResult{nil, fmt.Errorf("empty response from engine for capability %q (hint: runner.py printed nothing; check stderr logs)", capability)}
-			return
-		}
-		var resp Response
-		if err := json.Unmarshal([]byte(line), &resp); err != nil {
-			ch <- respResult{nil, fmt.Errorf("parse response for capability %q: %w (line: %s)", capability, err, truncate(line, 200))}
-			return
-		}
-		ch <- respResult{&resp, nil}
-	}()
 
 	timeout := b.timeout()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
+	// Cancellable write: a stuck or dead engine must not park us forever
+	// holding the mutex. The goroutine only touches locals + stdin.
+	stdin := b.stdin
+	writeCh := make(chan error, 1)
+	go func() {
+		if stdin == nil {
+			writeCh <- errors.New("engine stdin is closed")
+			return
+		}
+		_, werr := fmt.Fprintln(stdin, string(data))
+		writeCh <- werr
+	}()
+
 	select {
-	case result := <-ch:
-		return result.resp, result.err
+	case werr := <-writeCh:
+		if werr != nil {
+			b.killLocked()
+			return nil, fmt.Errorf("write capability %q to engine: %w (engine killed; it restarts on the next call)", capability, werr)
+		}
 	case <-ctx.Done():
-		return nil, fmt.Errorf("capability %q cancelled: %w", capability, ctx.Err())
+		b.killLocked()
+		return nil, &OutcomeUnknownError{Capability: capability, Err: fmt.Errorf("cancelled during write: %w", ctx.Err())}
 	case <-timer.C:
-		return nil, fmt.Errorf("engine timeout (%s) for capability %q (hint: retry with a larger Bridge.Timeout or split the workload)", timeout, capability)
+		b.killLocked()
+		return nil, &OutcomeUnknownError{Capability: capability, Err: fmt.Errorf("engine timeout (%s) during write", timeout)}
 	}
+
+	// Capped, id-correlated read. The reader goroutine only touches its
+	// local copy of the current fresh reader; on timeout/cancel the engine
+	// is killed and the reader discarded, so a late answer can never leak
+	// into a subsequent request.
+	reader := b.stdout
+	if reader == nil {
+		b.killLocked()
+		return nil, fmt.Errorf("engine reader gone for capability %q (engine killed; it restarts on the next call)", capability)
+	}
+	readCh := make(chan readResult, 1)
+	go func() {
+		line, rerr := readLineCapped(reader, MaxResponseSize)
+		readCh <- readResult{line: line, err: rerr}
+	}()
+
+	select {
+	case r := <-readCh:
+		if r.err != nil {
+			b.killLocked()
+			return nil, fmt.Errorf("read capability %q: %w (engine killed; it restarts on the next call)", capability, r.err)
+		}
+		line := strings.TrimSpace(r.line)
+		if line == "" {
+			b.killLocked()
+			return nil, fmt.Errorf("empty response from engine for capability %q (engine killed; hint: runner.py printed nothing; check stderr logs)", capability)
+		}
+		var resp Response
+		if err := json.Unmarshal([]byte(line), &resp); err != nil {
+			b.killLocked()
+			return nil, fmt.Errorf("parse response for capability %q: %w (engine killed; line: %s)", capability, err, truncate(line, 200))
+		}
+		if resp.ID == nil || *resp.ID != id {
+			b.killLocked()
+			return nil, fmt.Errorf("response id mismatch for capability %q: got %s, want %d (engine killed; stale answer rejected)", capability, formatResponseID(resp.ID), id)
+		}
+		return &resp, nil
+	case <-ctx.Done():
+		// Cancelled after the write: the operation may have executed.
+		b.killLocked()
+		return nil, &OutcomeUnknownError{Capability: capability, Err: fmt.Errorf("cancelled while waiting for response: %w", ctx.Err())}
+	case <-timer.C:
+		b.killLocked()
+		return nil, &OutcomeUnknownError{Capability: capability, Err: fmt.Errorf("engine timeout (%s) for capability %q (hint: retry with a larger Bridge.Timeout or split the workload)", timeout, capability)}
+	}
+}
+
+// readLineCapped reads one newline-terminated line, rejecting lines over
+// maxBytes with a clear error before they can grow without bound. On
+// oversize the stream position is left mid-line; the caller must kill the
+// engine to resync (a fresh reader starts on the next Execute).
+func readLineCapped(r *bufio.Reader, maxBytes int) (string, error) {
+	var sb strings.Builder
+	total := 0
+	for {
+		frag, err := r.ReadString('\n')
+		total += len(frag)
+		if total > maxBytes+1 {
+			return "", fmt.Errorf("engine response exceeds %d bytes, rejecting oversized line", maxBytes)
+		}
+		sb.WriteString(frag)
+		if err != nil {
+			if err == io.EOF && sb.Len() > 0 {
+				return sb.String(), nil
+			}
+			return "", err
+		}
+		if strings.HasSuffix(frag, "\n") {
+			return sb.String(), nil
+		}
+	}
+}
+
+func formatResponseID(id *uint64) string {
+	if id == nil {
+		return "<missing>"
+	}
+	return fmt.Sprintf("%d", *id)
 }
 
 // listCapabilities requests the list of all available capabilities.
@@ -391,21 +536,44 @@ func (b *Bridge) Stop() error {
 
 // stopLocked shuts down the subprocess. Caller must hold b.mu.
 func (b *Bridge) stopLocked() error {
+	b.killLocked()
+	return nil
+}
+
+// killLocked SIGKILLs the subprocess, closes the pipes (unblocking any
+// parked reader goroutine, which then exits via its buffered channel),
+// waits for the process to be reaped, and marks the bridge dead. The next
+// Execute restarts with a fresh process and a fresh reader, so answers
+// from the old process can never be matched to new requests.
+// Caller must hold b.mu.
+func (b *Bridge) killLocked() {
 	if b.cancel != nil {
 		b.cancel()
 		b.cancel = nil
 	}
 	if b.stdin != nil {
-		b.stdin.Close()
+		_ = b.stdin.Close()
+		b.stdin = nil
 	}
+	if b.stdoutPipe != nil {
+		_ = b.stdoutPipe.Close()
+		b.stdoutPipe = nil
+	}
+	b.stdout = nil
+	wc := b.waitCh
+	b.waitCh = nil
 	if b.cmd != nil && b.cmd.Process != nil {
 		_ = b.cmd.Process.Kill()
 	}
-	b.initialized = false
 	b.cmd = nil
-	b.stdin = nil
-	b.stdout = nil
-	return nil
+	b.initialized = false
+	if wc != nil {
+		select {
+		case <-wc:
+		case <-time.After(killWaitTimeout):
+			slog.Warn("python engine kill timed out waiting for exit")
+		}
+	}
 }
 
 func toString(v any) string {

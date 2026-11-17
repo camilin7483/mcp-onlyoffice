@@ -2,6 +2,10 @@ package storage
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -29,4 +33,104 @@ type Store interface {
 	Update(id string, data []byte) (*Document, error)
 	AddRef(id, refID string) error
 	GetRefs(id string) ([]string, error)
+}
+
+// Filesystem hardening limits shared by all file handlers.
+const (
+	MaxWriteBytes       = int64(64 << 20) // 64 MiB per write
+	MaxReadBytes        = int64(32 << 20) // 32 MiB per read
+	MaxWalkEntries      = 10000           // max entries per directory walk
+	MaxZipEntries       = 1000            // max entries extracted per zip
+	MaxZipUncompressed  = int64(256 << 20)
+	MaxCreateZipSources = 1000
+	backupTimeFormat    = "20060102150405"
+)
+
+// ResolvePath absolutizes and cleans p, rejects NUL bytes, resolves symlinks
+// on the deepest existing ancestor, and requires the result to stay inside one
+// of roots. It follows a leaf symlink (for reads); write/delete targets must
+// use ResolveDest instead so a leaf symlink is never followed.
+func ResolvePath(p string, roots []string) (string, error) {
+	if strings.ContainsRune(p, 0) {
+		return "", fmt.Errorf("invalid path: contains NUL byte")
+	}
+	abs, err := filepath.Abs(filepath.Clean(p))
+	if err != nil {
+		return "", fmt.Errorf("resolve path: %w", err)
+	}
+	// Deepest existing ancestor via Lstat (never follows symlinks here).
+	cur := abs
+	var rest []string
+	for {
+		if _, err := os.Lstat(cur); err == nil {
+			break
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", fmt.Errorf("path outside allowed roots: %s", p)
+		}
+		rest = append([]string{filepath.Base(cur)}, rest...)
+		cur = parent
+	}
+	real, err := filepath.EvalSymlinks(cur)
+	if err != nil {
+		return "", fmt.Errorf("resolve path: %w", err)
+	}
+	resolved := filepath.Clean(filepath.Join(append([]string{real}, rest...)...))
+	if !insideAnyRoot(resolved, roots) {
+		return "", fmt.Errorf("path outside allowed roots: %s", p)
+	}
+	return resolved, nil
+}
+
+// ResolveDest resolves p for creation/write/delete: the parent directory must
+// resolve inside a root, and a leaf symlink is never followed (refused).
+func ResolveDest(p string, roots []string) (string, error) {
+	if strings.ContainsRune(p, 0) {
+		return "", fmt.Errorf("invalid path: contains NUL byte")
+	}
+	abs, err := filepath.Abs(filepath.Clean(p))
+	if err != nil {
+		return "", fmt.Errorf("resolve path: %w", err)
+	}
+	parent, err := ResolvePath(filepath.Dir(abs), roots)
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "path outside allowed roots:") {
+			return "", fmt.Errorf("path outside allowed roots: %s", p)
+		}
+		return "", err
+	}
+	full := filepath.Join(parent, filepath.Base(abs))
+	if !insideAnyRoot(full, roots) {
+		return "", fmt.Errorf("path outside allowed roots: %s", p)
+	}
+	if fi, err := os.Lstat(full); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("refusing to follow symlink: %s", p)
+	}
+	return full, nil
+}
+
+func insideAnyRoot(resolved string, roots []string) bool {
+	for _, r := range roots {
+		if strings.ContainsRune(r, 0) {
+			continue
+		}
+		abs, err := filepath.Abs(filepath.Clean(r))
+		if err != nil {
+			continue
+		}
+		// Resolve the root itself so a symlinked root still matches.
+		if real, err := filepath.EvalSymlinks(abs); err == nil {
+			abs = real
+		}
+		if resolved == abs || strings.HasPrefix(resolved, abs+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// BackupTimestamp returns the current time formatted for .bak- suffixes.
+func BackupTimestamp() string {
+	return time.Now().Format(backupTimeFormat)
 }

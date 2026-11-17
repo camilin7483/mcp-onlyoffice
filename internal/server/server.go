@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	auditlog "github.com/cam/mcp-onlyoffice/internal/audit"
 	"github.com/cam/mcp-onlyoffice/internal/config"
 	"github.com/cam/mcp-onlyoffice/internal/desktoped"
 	"github.com/cam/mcp-onlyoffice/internal/engine"
@@ -76,9 +77,12 @@ func New(ctx context.Context, cfg *config.Config) (*MCPOnlyOffice, error) {
 	}
 
 	pyBridge := engine.NewBridge(pyEnginePath)
+	pyBridge.OutputDir = cfg.StoragePath
 	cache := NewSessionCache()
 	registry := NewToolRegistry()
 	tools := NewToolHandlers(store, desktopPath, bridge, pyBridge, cache, registry)
+	tools.SetAllowedRoots(cfg.EffectiveAllowedRoots()...)
+	tools.SetAuditLogger(auditlog.NewSilent(cfg.StoragePath))
 
 	slog.Info("initializing python engine bridge", "path", pyEnginePath)
 	if err := pyBridge.Start(ctx); err != nil {
