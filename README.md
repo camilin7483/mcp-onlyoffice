@@ -512,15 +512,16 @@ Based on the development plan in `system_prompt_mcp_onlyoffice_v2.md`:
 
 ## Known Issues
 
-- **ONLYOFFICE plugin**: requires Desktop Editors running with the plugin installed; the first
-  connection needs a plugin reload so it can read the new `/pair` token.
+- **ONLYOFFICE plugin**: requires Desktop Editors running with the plugin installed. The plugin
+  now auto-connects and retries every 5s even when the host does not call `Asc.plugin.init`.
 - **Plugin port fallback**: if the configured port is taken, the server may bind another port
   up to `port+49`; the plugin scans that range, but a random fallback outside it is not
   discoverable by design.
 - **Plugin live pairing**: verified with Desktop Editors under Xvfb (correct plugin folder/GUID,
-  CORS, `onlyoffice://plugin` origin, authenticated WebSocket on port 2021). Document commands
-  (`GetSelectedText`, `SearchAndReplace`) still need a final run in an interactive desktop
-  session: the headless editor did not expose the Asc plugin API to the command handler.
+  CORS, `onlyoffice://plugin` origin, authenticated WebSocket on port 2021, auto-connect). The
+  headless editor does not expose `Asc.plugin` to the command handler, so `GetSelectedText`
+  and `SearchAndReplace` still need one interactive desktop run; the command path itself is
+  tested through the plugin transport and Python/Go units.
 - **GLPI REST v2**: detected but not implemented; only the legacy `apirest.php` API is supported.
 - **tools.go**: file exceeds 800 lines — candidate for a future split.
 
