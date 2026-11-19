@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- A `professional` profile exposes 16 document-focused MCP tools. The default `legacy` profile retains all 70 registrations. Both profiles include MCP tool annotations.
+
+### Fixed
+
+- The desktop plugin discovers and reconnects to the bridge independently of the editor's initialization hook. Authenticated pairing has been verified under Xvfb. Live selection and replacement still need interactive verification.
+- Report packs sanitize output filenames, require explicit permission to overwrite existing files, and validate DOCX image widths.
+- Fresh checkouts include the Go command entry point. The ignore rule now matches only the compiled binaries at the repository root.
+
+### Documentation
+
+- Updated the source build and OpenCode setup, documented report images, and added a chart generated and embedded in a sample DOCX by the Python engine.
+
 ## [0.4.2] — 2026-11-17
 
 ### Reports
@@ -77,4 +93,4 @@ All notable changes to this project will be documented in this file.
 
 ### Validation
 - `go test ./internal/ooxml/ ./internal/validator/ ./internal/planner/ ./internal/workflow/ ./internal/storage/` — all pass.
-- E2E pack v2 (`/tmp/onlyoffice_e2e_v2`) — score 100.
+- The Q3 sample pack passed the structural validator with a score of 100.

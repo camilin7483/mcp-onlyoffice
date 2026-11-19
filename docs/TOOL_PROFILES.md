@@ -3,12 +3,12 @@
 `mcp-onlyoffice` exposes two tool profiles. Select with:
 
 ```bash
-MCP_ONLYOFFICE_TOOLSET=legacy        # default in 0.5: all 70 tools
-MCP_ONLYOFFICE_TOOLSET=professional  # curated 16 document tools
+export MCP_ONLYOFFICE_TOOLSET=professional
 ```
 
-The profile changes only `tools/list`; handlers, storage and the plugin are
-unchanged. Legacy clients keep working until 1.0.
+You can also set `"toolset": "professional"` in the server config. The default
+`legacy` profile registers all 70 tools. The selected profile determines which
+tools the MCP server lists and accepts calls for.
 
 ## Professional profile (16 tools)
 
@@ -43,16 +43,15 @@ Every registered tool carries MCP annotations:
 - `idempotentHint`: reads plus copy/export/render/validate/analyze.
 - `openWorldHint`: network, downloads, planner/agent/workflow/Python.
 
-Clients must still enforce their own allowlists: annotations are hints, not
-authorization.
+Annotations describe tools to the MCP client. Clients enforce their own
+authorization rules.
 
 ## Compatibility and deprecation
 
-- Tool names are not renamed in 0.5.
-- A future canonical naming (`doc_*`, `fs_*`, `admin_*`) must ship as aliases for
-  at least one minor release and be removed only in 1.0.
-- Output schemas and structured error codes are contract work planned for 0.6;
-  until then errors remain human-readable text with `isError=true`.
+- The legacy profile retains its existing tool names. The professional profile
+  uses the same names for its 16 tools.
+- Tool errors carry human-readable text with `isError=true`. Clients should
+  check individual outputs in a report pack for per-file errors.
 
 ## Known gaps
 
