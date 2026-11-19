@@ -7,6 +7,19 @@ import (
 	"testing"
 )
 
+// skipSymlinkIfUnsupported skips when the platform or user cannot create
+// symlinks. Only permission errors skip; anything else still fails.
+func skipSymlinkIfUnsupported(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		return
+	}
+	if os.IsPermission(err) {
+		t.Skipf("symlink creation unsupported: %v", err)
+	}
+	t.Fatalf("symlink creation failed: %v", err)
+}
+
 func newTestStore(t *testing.T) *LocalStore {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "mcp-storage-test-*")
@@ -238,15 +251,11 @@ func TestResolvePathSymlinkEscape(t *testing.T) {
 	if err := os.WriteFile(secret, []byte("s"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(secret, filepath.Join(root, "link.txt")); err != nil {
-		t.Fatal(err)
-	}
+	skipSymlinkIfUnsupported(t, os.Symlink(secret, filepath.Join(root, "link.txt")))
 	if _, err := ResolvePath(filepath.Join(root, "link.txt"), []string{root}); err == nil {
 		t.Error("file symlink escape: want error, got nil")
 	}
-	if err := os.Symlink(outside, filepath.Join(root, "dlink")); err != nil {
-		t.Fatal(err)
-	}
+	skipSymlinkIfUnsupported(t, os.Symlink(outside, filepath.Join(root, "dlink")))
 	if _, err := ResolvePath(filepath.Join(root, "dlink", "secret.txt"), []string{root}); err == nil {
 		t.Error("dir symlink escape: want error, got nil")
 	}
@@ -259,9 +268,7 @@ func TestResolveDestRefusesLeafSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	link := filepath.Join(root, "link.txt")
-	if err := os.Symlink(real, link); err != nil {
-		t.Fatal(err)
-	}
+	skipSymlinkIfUnsupported(t, os.Symlink(real, link))
 	if _, err := ResolveDest(link, []string{root}); err == nil {
 		t.Error("ResolveDest on symlink: want error, got nil")
 	}

@@ -8,14 +8,14 @@ import (
 )
 
 // ToolRegistry manages progressive tool discovery.
-// Instead of registering ALL tools at startup, it groups them into tiers:
+// All tools are registered at startup; tiers are discovery metadata only:
 //
-//	Tier 1: Essential (always loaded — file operations, basic CRUD)
-//	Tier 2: Common (loaded on demand — most used tools)
+//	Tier 1: Essential (file operations, basic CRUD)
+//	Tier 2: Common (most used tools)
 //	Tier 3: Advanced (loaded only when explicitly needed)
 //
 // The model receives only Tier 1 descriptions by default.
-// Tier 2/3 tools are registered via discovery requests.
+// Tier 2/3 tools are surfaced via discovery requests.
 type ToolRegistry struct {
 	mu    sync.RWMutex
 	all   map[string]toolDef

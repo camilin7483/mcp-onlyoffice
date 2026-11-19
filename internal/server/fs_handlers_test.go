@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -36,6 +37,20 @@ func testFS(t *testing.T) (*ToolHandlers, string) {
 	})
 	h.SetAllowedRoots(root)
 	return h, root
+}
+
+// skipSymlinkIfUnsupported skips when the platform or user cannot create
+// symlinks (Windows without privileges, restricted containers). Only
+// permission errors skip; anything else still fails.
+func skipSymlinkIfUnsupported(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		return
+	}
+	if os.IsPermission(err) {
+		t.Skipf("symlink creation unsupported: %v", err)
+	}
+	t.Fatalf("symlink creation failed: %v", err)
 }
 
 func resultText(t *testing.T, r *mcp.CallToolResult) string {
@@ -107,18 +122,14 @@ func TestFSSymlinkEscape(t *testing.T) {
 	}
 	// File symlink pointing outside.
 	link := filepath.Join(root, "link.txt")
-	if err := os.Symlink(secret, link); err != nil {
-		t.Fatal(err)
-	}
+	skipSymlinkIfUnsupported(t, os.Symlink(secret, link))
 	r, _ := h.handleReadFile(context.Background(), map[string]any{"path": link})
 	if !r.IsError || !strings.Contains(resultText(t, r), "path outside allowed roots") {
 		t.Errorf("file symlink escape not denied: %s", resultText(t, r))
 	}
 	// Dir symlink pointing outside.
 	dlink := filepath.Join(root, "dlink")
-	if err := os.Symlink(outside, dlink); err != nil {
-		t.Fatal(err)
-	}
+	skipSymlinkIfUnsupported(t, os.Symlink(outside, dlink))
 	r, _ = h.handleReadFile(context.Background(), map[string]any{"path": filepath.Join(dlink, "secret.txt")})
 	if !r.IsError || !strings.Contains(resultText(t, r), "path outside allowed roots") {
 		t.Errorf("dir symlink escape not denied: %s", resultText(t, r))
@@ -187,6 +198,37 @@ func TestFSOverwriteRefusalAndBackup(t *testing.T) {
 	auditData, _ := os.ReadFile(al.Path())
 	if !strings.Contains(string(auditData), "backup") {
 		t.Errorf("audit missing backup entry: %s", auditData)
+	}
+}
+
+func TestFSConsecutiveOverwriteBackupsUnique(t *testing.T) {
+	h, root := testFS(t)
+	p := filepath.Join(root, "doc.txt")
+	callOK(t, h.handleWriteText, map[string]any{"path": p, "content": "v1"})
+	// Two back-to-back overwrites inside the same second must both succeed
+	// with two distinct backup names.
+	callOK(t, h.handleWriteText, map[string]any{"path": p, "content": "v2", "overwrite": true})
+	callOK(t, h.handleWriteText, map[string]any{"path": p, "content": "v3", "overwrite": true})
+	matches, _ := filepath.Glob(p + ".bak-*")
+	if len(matches) != 2 {
+		t.Fatalf("want 2 distinct backups, got %v", matches)
+	}
+	if matches[0] == matches[1] {
+		t.Fatalf("backup names collided: %v", matches)
+	}
+	contents := map[string]bool{}
+	for _, m := range matches {
+		bak, err := os.ReadFile(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		contents[string(bak)] = true
+	}
+	if !contents["v1"] || !contents["v2"] {
+		t.Errorf("backups must hold v1 and v2, got %v", contents)
+	}
+	if data, _ := os.ReadFile(p); string(data) != "v3" {
+		t.Errorf("content = %q, want v3", data)
 	}
 }
 
@@ -311,9 +353,7 @@ func TestFSZipSymlinkedDestBlocked(t *testing.T) {
 	h, root := testFS(t)
 	outside := t.TempDir()
 	destLink := filepath.Join(root, "destlink")
-	if err := os.Symlink(outside, destLink); err != nil {
-		t.Fatal(err)
-	}
+	skipSymlinkIfUnsupported(t, os.Symlink(outside, destLink))
 	zp := filepath.Join(root, "z.zip")
 	writeTestZip(t, zp, map[string]string{"ok.txt": "x"}, nil)
 	r, _ := h.handleExtractZip(context.Background(), map[string]any{"path": zp, "dest": destLink})
@@ -387,8 +427,15 @@ func TestWriteBackupRefusesExistingAndSymlink(t *testing.T) {
 	if bak, _ := os.ReadFile(dst); string(bak) != "orig" {
 		t.Errorf("backup content = %q, want orig", bak)
 	}
-	if fi, _ := os.Stat(dst); fi.Mode().Perm() != 0600 {
-		t.Errorf("backup mode = %o, want 600", fi.Mode().Perm())
+	// POSIX mode bits are not enforced on Windows.
+	if runtime.GOOS != "windows" {
+		fi, err := os.Stat(dst)
+		if err != nil {
+			t.Fatalf("stat backup: %v", err)
+		}
+		if fi.Mode().Perm() != 0600 {
+			t.Errorf("backup mode = %o, want 600", fi.Mode().Perm())
+		}
 	}
 	// Existing destination (regular file) is refused, source untouched.
 	if err := writeBackup(src, dst); err == nil || !strings.Contains(err.Error(), "backup exists") {
@@ -400,9 +447,7 @@ func TestWriteBackupRefusesExistingAndSymlink(t *testing.T) {
 	outside := t.TempDir()
 	planted := filepath.Join(outside, "evil.txt")
 	link := filepath.Join(root, "link.bak")
-	if err := os.Symlink(planted, link); err != nil {
-		t.Fatal(err)
-	}
+	skipSymlinkIfUnsupported(t, os.Symlink(planted, link))
 	if err := writeBackup(src, link); err == nil {
 		t.Errorf("symlink backup not refused")
 	}

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cam/mcp-onlyoffice/internal/version"
@@ -33,36 +34,85 @@ const AppName = "mcp-onlyoffice"
 const (
 	// maxMessageBytes caps a single plugin frame (read limit, 1 MiB).
 	maxMessageBytes = 1 << 20
-	// maxPending caps concurrent in-flight commands.
-	maxPending = 32
+	// helloWindow is how long a new connection has to send hello.
+	helloWindow = 5 * time.Second
+	// defaultRequestTimeout applies when the caller passes no timeout.
+	defaultRequestTimeout = 10 * time.Second
 	// scanPorts is how many ports from base are tried before a random fallback.
 	scanPorts = 50
 )
 
-type Command struct {
-	ID     string         `json:"id"`
-	Method string         `json:"method"`
-	Params map[string]any `json:"params,omitempty"`
+// Wire frames. The plugin never receives JavaScript: the server only sends
+// closed-switch method names, and the plugin only replies with results.
+type helloFrame struct {
+	Type             string   `json:"type"`
+	Protocol         int      `json:"protocol"`
+	PluginInstanceID string   `json:"plugin_instance_id"`
+	EditorType       string   `json:"editor_type"`
+	Capabilities     []string `json:"capabilities"`
+	ClientVersion    string   `json:"client_version"`
 }
 
-type Response struct {
-	ID     string `json:"id"`
-	Result any    `json:"result,omitempty"`
-	Error  string `json:"error,omitempty"`
+type helloAckFrame struct {
+	Type          string         `json:"type"`
+	Protocol      int            `json:"protocol"`
+	SessionID     string         `json:"session_id"`
+	ServerVersion string         `json:"server_version"`
+	Limits        map[string]int `json:"limits"`
+}
+
+type commandFrame struct {
+	Type       string         `json:"type"`
+	ID         string         `json:"id"`
+	Method     string         `json:"method"`
+	Params     map[string]any `json:"params,omitempty"`
+	DeadlineMs int64          `json:"deadline_ms"`
+}
+
+type responseError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type responseFrame struct {
+	Type   string         `json:"type"`
+	ID     string         `json:"id"`
+	OK     bool           `json:"ok"`
+	Result any            `json:"result,omitempty"`
+	Error  *responseError `json:"error,omitempty"`
+}
+
+type pendingResult struct {
+	resp responseFrame
+	fail *RPCError
 }
 
 type pendingReq struct {
-	ch    chan Response
-	timer *time.Timer
+	ch chan pendingResult
+}
+
+// sessionEntry is a Session plus its live connection state. Writes are
+// serialised with writeMu because websocket writes are not concurrent-safe.
+type sessionEntry struct {
+	Session
+	conn      *websocket.Conn
+	writeMu   sync.Mutex
+	pending   map[string]*pendingReq
+	completed map[string]time.Time
 }
 
 type Bridge struct {
-	mu        sync.Mutex
-	conn      *websocket.Conn
-	pending   map[string]*pendingReq
-	connected bool
-	port      int
-	realPort  int
+	reg *Registry
+	// drop counters: unsolicited ids vs repeats of completed ids.
+	unsolicited atomic.Uint64
+	duplicate   atomic.Uint64
+
+	port     int
+	realPort int
+	// mu guards realPort: Start writes it while ListenAddr/ListenPort and
+	// the /ping and /pair handlers read it from other goroutines. It is
+	// never held while blocking in Serve.
+	mu        sync.RWMutex
 	srv       *http.Server
 	token     string
 	tokenPath string
@@ -70,9 +120,9 @@ type Bridge struct {
 
 func NewBridge(port int) *Bridge {
 	b := &Bridge{
-		pending: make(map[string]*pendingReq),
-		port:    port,
-		token:   newToken(),
+		reg:   NewRegistry(),
+		port:  port,
+		token: newToken(),
 	}
 	b.tokenPath = defaultTokenPath()
 	if b.tokenPath == "" {
@@ -89,6 +139,16 @@ func newToken() string {
 	var buf [32]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		panic(fmt.Sprintf("bridge token: %v", err))
+	}
+	return hex.EncodeToString(buf[:])
+}
+
+// newWireID returns 32 hex chars from crypto/rand. Request ids are never
+// timestamps, so concurrent sessions cannot collide on them.
+func newWireID() string {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		panic(fmt.Sprintf("wire id: %v", err))
 	}
 	return hex.EncodeToString(buf[:])
 }
@@ -117,24 +177,34 @@ func (b *Bridge) Token() string { return b.token }
 // TokenPath returns where the token was persisted ("" if memory-only).
 func (b *Bridge) TokenPath() string { return b.tokenPath }
 
+// setRealPort records the bound port. Caller must not hold b.mu.
+func (b *Bridge) setRealPort(port int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.realPort = port
+}
+
 // ListenAddr returns the actual address the bridge is listening on.
 func (b *Bridge) ListenAddr() string {
-	return fmt.Sprintf("127.0.0.1:%d", b.realPort)
+	return fmt.Sprintf("127.0.0.1:%d", b.ListenPort())
 }
 
 // ListenPort returns the actual port the bridge is listening on.
 func (b *Bridge) ListenPort() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 	return b.realPort
 }
 
 func (b *Bridge) Start() error {
 	var listener net.Listener
 	var err error
+	chosen := 0
 	for port := b.port; port < b.port+scanPorts; port++ {
 		addr := fmt.Sprintf("127.0.0.1:%d", port)
 		listener, err = net.Listen("tcp", addr)
 		if err == nil {
-			b.realPort = port
+			chosen = port
 			break
 		}
 	}
@@ -145,17 +215,18 @@ func (b *Bridge) Start() error {
 		if err != nil {
 			return fmt.Errorf("bridge listen: %w", err)
 		}
-		b.realPort = listener.Addr().(*net.TCPAddr).Port
+		chosen = listener.Addr().(*net.TCPAddr).Port
 		slog.Warn("bridge on random port outside plugin scan range; plugin discovery will not find it",
-			"port", b.realPort)
+			"port", chosen)
 	}
+	b.setRealPort(chosen)
 
 	b.srv = &http.Server{
 		Addr:    listener.Addr().String(),
 		Handler: b.handler(),
 	}
 
-	slog.Info("WebSocket bridge", "addr", fmt.Sprintf("ws://127.0.0.1:%d/plugin", b.realPort))
+	slog.Info("WebSocket bridge", "addr", fmt.Sprintf("ws://127.0.0.1:%d/plugin", b.ListenPort()))
 
 	if err := b.srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 		return err
@@ -189,7 +260,7 @@ func (b *Bridge) handlePing(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, map[string]any{"app": AppName, "port": b.realPort, "version": BridgeVersion, "protocol": version.BridgeProtocol})
+	writeJSON(w, map[string]any{"app": AppName, "port": b.ListenPort(), "version": BridgeVersion, "protocol": version.BridgeProtocol})
 }
 
 // handlePair hands the per-launch token to a local pairing client. Only
@@ -217,7 +288,7 @@ func (b *Bridge) handlePair(w http.ResponseWriter, r *http.Request) {
 	// The plugin runs inside a file:// / null-origin iframe; without this the
 	// browser blocks reading the token even though pairing is allowed.
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	writeJSON(w, map[string]any{"token": b.token, "port": b.realPort, "app": AppName})
+	writeJSON(w, map[string]any{"token": b.token, "port": b.ListenPort(), "app": AppName})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -277,6 +348,15 @@ func (b *Bridge) validToken(r *http.Request) bool {
 	return false
 }
 
+func normalizeEditorType(t string) string {
+	switch strings.ToLower(strings.TrimSpace(t)) {
+	case "word", "cell", "slide", "pdf":
+		return strings.ToLower(strings.TrimSpace(t))
+	default:
+		return "unknown"
+	}
+}
+
 func (b *Bridge) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	if !allowedWSOrigin(r.Header.Get("Origin")) {
 		http.Error(w, "origin rejected", http.StatusForbidden)
@@ -295,39 +375,91 @@ func (b *Bridge) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	c.SetReadLimit(maxMessageBytes)
 
-	slog.Info("desktop editors connected")
-
-	b.mu.Lock()
-	if old := b.conn; old != nil {
-		// Only one plugin client at a time: close the stale one explicitly
-		// instead of silently stealing its connection.
-		slog.Warn("closing previous plugin connection: second client connected")
-		_ = old.Close(websocket.StatusPolicyViolation, "replaced by new plugin connection")
+	// The first frame must be hello within the window; anything else (or
+	// silence) closes the connection before any session exists.
+	hctx, cancel := context.WithTimeout(r.Context(), helloWindow)
+	_, data, err := c.Read(hctx)
+	cancel()
+	if err != nil {
+		slog.Warn("plugin hello timeout", "error", err)
+		_ = c.Close(websocket.StatusPolicyViolation, "hello required within 5 seconds")
+		return
 	}
-	b.conn = c
-	b.connected = true
-	b.mu.Unlock()
+	var hello helloFrame
+	if err := json.Unmarshal(data, &hello); err != nil || hello.Type != "hello" {
+		slog.Warn("plugin first frame must be hello")
+		_ = c.Close(websocket.StatusPolicyViolation, "first frame must be hello")
+		return
+	}
+	if hello.Protocol != version.BridgeProtocol {
+		msg := fmt.Sprintf("unsupported protocol %d, want %d", hello.Protocol, version.BridgeProtocol)
+		payload, _ := json.Marshal(map[string]any{"type": "error", "code": CodeProtocolMismatch, "message": msg})
+		_ = c.Write(context.Background(), websocket.MessageText, payload)
+		slog.Warn("plugin protocol mismatch", "got", hello.Protocol)
+		_ = c.Close(websocket.StatusProtocolError, "protocol_mismatch: "+msg)
+		return
+	}
+	if strings.TrimSpace(hello.PluginInstanceID) == "" {
+		_ = c.Close(websocket.StatusPolicyViolation, "invalid_frame: missing plugin_instance_id")
+		return
+	}
+
+	caps := make(map[string]bool, len(hello.Capabilities))
+	for _, cp := range hello.Capabilities {
+		if cp = strings.TrimSpace(cp); cp != "" {
+			caps[cp] = true
+		}
+	}
+	now := time.Now()
+	entry := &sessionEntry{
+		Session: Session{
+			ID:               newWireID(),
+			PluginInstanceID: hello.PluginInstanceID,
+			EditorType:       normalizeEditorType(hello.EditorType),
+			Capabilities:     caps,
+			ConnectedAt:      now,
+			LastSeen:         now,
+		},
+		conn:      c,
+		pending:   make(map[string]*pendingReq),
+		completed: make(map[string]time.Time),
+	}
+	if err := b.reg.add(entry); err != nil {
+		slog.Warn("plugin session limit reached")
+		_ = c.Close(websocket.StatusPolicyViolation, "session limit reached (8)")
+		return
+	}
+
+	ack, _ := json.Marshal(helloAckFrame{
+		Type:          "hello_ack",
+		Protocol:      version.BridgeProtocol,
+		SessionID:     entry.ID,
+		ServerVersion: version.Version,
+		Limits:        map[string]int{"max_frame_bytes": maxMessageBytes, "request_timeout_ms": 10000},
+	})
+	if err := c.Write(r.Context(), websocket.MessageText, ack); err != nil {
+		b.reg.remove(entry.ID)
+		return
+	}
+	slog.Info("desktop editors connected", "session", entry.ID, "editor", entry.EditorType)
 
 	defer func() {
-		b.mu.Lock()
-		// Only clear state if this handler still owns the connection; a newer
-		// client may have replaced it while this one was draining.
-		if b.conn == c {
-			b.conn = nil
-			b.connected = false
-			for id, p := range b.pending {
-				p.timer.Stop()
-				// Wake the waiter with an error, never a zero Response that
+		if removed := b.reg.remove(entry.ID); removed != nil {
+			fail := errDisconnected()
+			b.reg.mu.Lock()
+			for id, p := range removed.pending {
+				// Wake the waiter with a typed error, never a zero result
 				// SendCommand could mistake for success.
 				select {
-				case p.ch <- Response{ID: id, Error: "plugin disconnected"}:
+				case p.ch <- pendingResult{fail: fail}:
 				default:
 				}
-				close(p.ch)
-				delete(b.pending, id)
+				markCompletedLocked(removed, id)
+				delete(removed.pending, id)
 			}
+			b.reg.mu.Unlock()
 		}
-		b.mu.Unlock()
+		_ = c.Close(websocket.StatusNormalClosure, "done")
 	}()
 
 	ctx := r.Context()
@@ -337,88 +469,198 @@ func (b *Bridge) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("plugin read", "error", err)
 			return
 		}
-
-		var resp Response
-		if err := json.Unmarshal(data, &resp); err != nil {
-			slog.Warn("plugin parse", "error", err)
+		var resp responseFrame
+		if err := json.Unmarshal(data, &resp); err != nil || resp.Type != "response" {
+			slog.Warn("plugin invalid frame: want {type:response,...}")
 			continue
 		}
-
-		b.deliverResponse(resp)
+		b.deliver(entry, resp)
 	}
 }
 
-func (b *Bridge) deliverResponse(resp Response) {
-	b.mu.Lock()
-	p, ok := b.pending[resp.ID]
-	if ok {
-		p.timer.Stop()
-		delete(b.pending, resp.ID)
-	}
-	b.mu.Unlock()
-
-	if ok {
-		p.ch <- resp
-		close(p.ch)
+func markCompletedLocked(e *sessionEntry, id string) {
+	e.completed[id] = time.Now()
+	if len(e.completed) > 128 {
+		oldest, oldestAt := "", time.Now()
+		for cid, at := range e.completed {
+			if oldest == "" || at.Before(oldestAt) {
+				oldest, oldestAt = cid, at
+			}
+		}
+		delete(e.completed, oldest)
 	}
 }
 
-func (b *Bridge) SendCommand(ctx context.Context, method string, params map[string]any, timeout time.Duration) (any, error) {
-	id := fmt.Sprintf("mcp-%d", time.Now().UnixNano())
-
-	cmd := Command{
-		ID:     id,
-		Method: method,
-		Params: params,
+func (b *Bridge) deliver(entry *sessionEntry, resp responseFrame) {
+	b.reg.mu.Lock()
+	p, ok := entry.pending[resp.ID]
+	if ok {
+		delete(entry.pending, resp.ID)
+		markCompletedLocked(entry, resp.ID)
+		entry.LastSeen = time.Now()
 	}
-
-	ch := make(chan Response, 1)
-	timer := time.NewTimer(timeout)
-
-	b.mu.Lock()
-	if !b.connected || b.conn == nil {
-		b.mu.Unlock()
-		timer.Stop()
-		return nil, fmt.Errorf("plugin not connected")
+	var dup bool
+	if !ok {
+		_, dup = entry.completed[resp.ID]
+		if dup {
+			b.duplicate.Add(1)
+		} else {
+			b.unsolicited.Add(1)
+		}
 	}
-	if len(b.pending) >= maxPending {
-		b.mu.Unlock()
-		timer.Stop()
-		return nil, fmt.Errorf("too many pending plugin requests")
+	b.reg.mu.Unlock()
+
+	if !ok {
+		// Unsolicited or duplicate: log at warn, ignore, never close the
+		// connection and never match it to another request.
+		if dup {
+			slog.Warn("duplicate plugin response ignored", "session", entry.ID, "id", resp.ID)
+		} else {
+			slog.Warn("unsolicited plugin response ignored", "session", entry.ID, "id", resp.ID)
+		}
+		return
 	}
-	b.pending[id] = &pendingReq{ch: ch, timer: timer}
-	conn := b.conn
-	b.mu.Unlock()
-
-	defer func() {
-		timer.Stop()
-		b.mu.Lock()
-		delete(b.pending, id)
-		b.mu.Unlock()
-	}()
-
-	data, err := json.Marshal(cmd)
-	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
-	}
-
-	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
-		return nil, fmt.Errorf("write: %w", err)
-	}
-
 	select {
-	case resp, ok := <-ch:
+	case p.ch <- pendingResult{resp: resp}:
+	default:
+	}
+}
+
+// DropStats reports ignored responses: unsolicited ids and repeats of
+// already-completed ids.
+func (b *Bridge) DropStats() (unsolicited, duplicate uint64) {
+	return b.unsolicited.Load(), b.duplicate.Load()
+}
+
+// Sessions returns the read-only registry snapshot.
+func (b *Bridge) Sessions() []SessionInfo {
+	return b.reg.Sessions()
+}
+
+// SendTo runs one command on the named session.
+func (b *Bridge) SendTo(sessionID, method string, params map[string]any, timeout time.Duration) (any, error) {
+	entry := b.reg.get(sessionID)
+	if entry == nil {
+		if b.reg.Count() == 0 {
+			return nil, errNotConnected()
+		}
+		return nil, errSessionNotFound(sessionID)
+	}
+	return b.sendOnEntry(context.Background(), entry, method, params, timeout)
+}
+
+// SendCommand runs one command on the active session (most recently
+// connected or used). It keeps the legacy signature used by the six editor
+// tool handlers.
+func (b *Bridge) SendCommand(ctx context.Context, method string, params map[string]any, timeout time.Duration) (any, error) {
+	entry := b.reg.active()
+	if entry == nil {
+		return nil, errNotConnected()
+	}
+	return b.sendOnEntry(ctx, entry, method, params, timeout)
+}
+
+func (b *Bridge) sendOnEntry(ctx context.Context, entry *sessionEntry, method string, params map[string]any, timeout time.Duration) (any, error) {
+	if timeout <= 0 {
+		timeout = defaultRequestTimeout
+	}
+	// Refuse commands the session did not advertise; never assume the
+	// editor supports them.
+	if need, ok := methodCapabilities[method]; ok && need != "" && !entry.Capabilities[need] {
+		return nil, errUnsupported(entry.ID, entry.EditorType, method, need)
+	}
+	id := newWireID()
+	cmd, err := json.Marshal(commandFrame{
+		Type: "command", ID: id, Method: method, Params: params,
+		DeadlineMs: timeout.Milliseconds(),
+	})
+	if err != nil {
+		return nil, errPluginError(fmt.Sprintf("marshal: %v", err))
+	}
+
+	ch := make(chan pendingResult, 1)
+	b.reg.mu.Lock()
+	if b.reg.sessions[entry.ID] != entry {
+		b.reg.mu.Unlock()
+		return nil, errSessionNotFound(entry.ID)
+	}
+	if len(entry.pending) >= MaxPendingPerSession {
+		b.reg.mu.Unlock()
+		return nil, errTooManyPending()
+	}
+	entry.pending[id] = &pendingReq{ch: ch}
+	b.reg.mu.Unlock()
+
+	fail := func(f *RPCError) (any, error) {
+		b.reg.mu.Lock()
+		delete(entry.pending, id)
+		markCompletedLocked(entry, id)
+		b.reg.mu.Unlock()
+		return nil, f
+	}
+
+	// A deadline already exceeded before the write is a plain timeout:
+	// no bytes went out, so the outcome is known (nothing happened).
+	if err := ctx.Err(); err != nil {
+		return fail(errTimeout("timeout before write: " + err.Error()))
+	}
+	entry.writeMu.Lock()
+	werr := entry.conn.Write(ctx, websocket.MessageText, cmd)
+	entry.writeMu.Unlock()
+	if werr != nil {
+		// The write failed partway: the command may have reached the
+		// plugin, so the outcome is unknown.
+		return fail(&RPCError{Code: CodePluginError, Message: "write: " + werr.Error(), Retriable: true, OutcomeUnknown: true})
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case r, ok := <-ch:
 		if !ok {
-			return nil, fmt.Errorf("plugin disconnected")
+			return nil, errDisconnected()
 		}
-		if resp.Error != "" {
-			return nil, fmt.Errorf("plugin error: %s", resp.Error)
+		if r.fail != nil {
+			return nil, r.fail
 		}
+		resp := r.resp
+		b.reg.mu.Lock()
+		entry.LastSeen = time.Now()
+		b.reg.mu.Unlock()
+		if !resp.OK {
+			// Missing or unknown error codes are still errors, never success.
+			code, msg := CodePluginError, ""
+			if resp.Error != nil {
+				msg = resp.Error.Message
+				if resp.Error.Code != "" {
+					code = resp.Error.Code
+				}
+			}
+			if msg == "" {
+				msg = "plugin error"
+			}
+			return nil, &RPCError{Code: code, Message: "plugin error: " + msg}
+		}
+		if mutationMethods[method] {
+			b.reg.mu.Lock()
+			entry.Revision++
+			b.reg.mu.Unlock()
+		}
+		b.reg.touch(entry.ID)
 		return resp.Result, nil
 	case <-timer.C:
-		return nil, fmt.Errorf("timeout waiting for plugin response")
+		// The command bytes were written but no reply arrived: outcome unknown.
+		b.reg.mu.Lock()
+		delete(entry.pending, id)
+		markCompletedLocked(entry, id)
+		b.reg.mu.Unlock()
+		return nil, errOutcomeUnknown("timeout waiting for plugin response (outcome unknown: command was sent)")
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		b.reg.mu.Lock()
+		delete(entry.pending, id)
+		markCompletedLocked(entry, id)
+		b.reg.mu.Unlock()
+		return nil, &RPCError{Code: CodeTimeout, Message: "context done waiting for plugin response: " + ctx.Err().Error(), Retriable: true, OutcomeUnknown: true}
 	}
 }
 
@@ -478,8 +720,7 @@ func asInt(n any) (int, error) {
 	return int(f), nil
 }
 
+// IsConnected reports whether any session is live.
 func (b *Bridge) IsConnected() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.connected
+	return b.reg.Count() > 0
 }

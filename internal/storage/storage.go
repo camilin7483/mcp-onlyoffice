@@ -43,7 +43,10 @@ const (
 	MaxZipEntries       = 1000            // max entries extracted per zip
 	MaxZipUncompressed  = int64(256 << 20)
 	MaxCreateZipSources = 1000
-	backupTimeFormat    = "20060102150405"
+	// backupTimeFormat has nanosecond resolution so two overwrites of the
+	// same file inside one second still get distinct .bak- names (writeBackup
+	// refuses an existing destination with O_EXCL).
+	backupTimeFormat = "20060102150405.000000000"
 )
 
 // ResolvePath absolutizes and cleans p, rejects NUL bytes, resolves symlinks

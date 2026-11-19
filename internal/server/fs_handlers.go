@@ -223,7 +223,7 @@ func (h *ToolHandlers) refuseRoot(resolved, verb string) *mcp.CallToolResult {
 }
 
 // ensureWritable refuses to clobber an existing file unless overwrite=true;
-// on overwrite it backs the previous file up to <name>.bak-YYYYMMDDHHMMSS
+// on overwrite it backs the previous file up to <name>.bak-<timestamp>
 // and audits. Returns the backup path ("" when nothing was backed up).
 func ensureWritable(resolved, action string, args map[string]any) (string, *mcp.CallToolResult) {
 	fi, err := os.Lstat(resolved)
@@ -368,6 +368,9 @@ func (h *ToolHandlers) handleAppendText(ctx context.Context, args map[string]any
 		}
 		if fi.Mode()&os.ModeSymlink != 0 {
 			return textError(fmt.Sprintf("refusing to follow symlink: %s", resolved)), nil
+		}
+		if !fi.Mode().IsRegular() {
+			return textError(fmt.Sprintf("refusing to append to non-regular file: %s", resolved)), nil
 		}
 		if !overwriteOK(args) {
 			return textError(fmt.Sprintf("file exists: %s (pass overwrite=true)", resolved)), nil

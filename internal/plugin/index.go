@@ -79,6 +79,8 @@ func pluginConfigJSON() string {
 
 // pluginIndexHTML is the embedded bridge page. Kept in a function so tests
 // can assert on its content (no full-document paste path, /ping discovery).
+// The connect path is versioned: hello after open, wait for hello_ack,
+// then process command frames on the closed switch below.
 func pluginIndexHTML() string {
 	return `<!DOCTYPE html>
 <html>
@@ -86,12 +88,49 @@ func pluginIndexHTML() string {
 <meta charset="utf-8">
 <script>
 let ws = null;
+let ready = false;
+let helloTimer = null;
 let pluginApi = null; // captured at init; the host may clear the global afterwards
 let portOffset = 0;
 let backoffMs = 1000;
 const PORT_START = 2021;
 const PORT_SCAN_MAX = 50;
 const BACKOFF_MAX_MS = 30000;
+const PROTOCOL = 2;
+const CLIENT_VERSION = "` + pluginVersion + `";
+
+// Capability set the server enforces per method. Only the editor type that
+// actually implements a method advertises it: the full-content Office API
+// call inside callCommand exists only in word, so only word claims
+// reader.full_content and the methods built on it.
+function capabilitiesFor(editorType) {
+  switch (editorType) {
+    case "word":
+      return ["reader.selected_text", "reader.full_content",
+        "writer.insert_text", "writer.replace_text",
+        "writer.create_table", "writer.create_list"];
+    case "cell":
+    case "slide":
+      return ["reader.selected_text", "writer.insert_text"];
+    default:
+      return ["reader.selected_text"];
+  }
+}
+
+function editorType() {
+  try {
+    var t = Asc && Asc.plugin && Asc.plugin.info && Asc.plugin.info.editorType;
+    if (t === "word" || t === "cell" || t === "slide" || t === "pdf") return t;
+  } catch (e) {}
+  return "unknown";
+}
+
+function pluginInstanceId() {
+  try {
+    if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  } catch (e) {}
+  return "id-" + Math.random().toString(16).slice(2) + Date.now().toString(16);
+}
 
 // Probe each candidate port over HTTP and only talk to the one that
 // identifies itself as mcp-onlyoffice. Never connect blindly: another
@@ -121,6 +160,8 @@ async function pair(port) {
 }
 
 function scheduleReconnect() {
+  ready = false;
+  if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }
   if (ws) { ws.onclose = null; ws.onerror = null; try { ws.close(); } catch (e) {} ws = null; }
   setTimeout(connect, backoffMs);
   backoffMs = Math.min(backoffMs * 2, BACKOFF_MAX_MS);
@@ -148,13 +189,44 @@ async function connect() {
   ws.onopen = () => {
     console.log("[MCP] connected on port " + port);
     backoffMs = 1000;
+    // Versioned handshake: hello first, commands only after hello_ack.
+    var et = editorType();
+    ws.send(JSON.stringify({
+      type: "hello",
+      protocol: PROTOCOL,
+      plugin_instance_id: pluginInstanceId(),
+      editor_type: et,
+      capabilities: capabilitiesFor(et),
+      client_version: CLIENT_VERSION
+    }));
+    if (helloTimer) clearTimeout(helloTimer);
+    helloTimer = setTimeout(() => {
+      console.error("[MCP] no hello_ack, reconnecting");
+      scheduleReconnect();
+    }, 5000);
   };
   ws.onmessage = (e) => {
+    let msg;
     try {
-      const msg = JSON.parse(e.data);
-      handleCommand(msg);
+      msg = JSON.parse(e.data);
     } catch (err) {
       console.error("[MCP] parse error:", err);
+      return;
+    }
+    if (!ready) {
+      if (msg && msg.type === "hello_ack" && msg.protocol === PROTOCOL) {
+        ready = true;
+        if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }
+        console.log("[MCP] session " + msg.session_id);
+      }
+      return;
+    }
+    if (msg && msg.type === "command") {
+      try {
+        handleCommand(msg);
+      } catch (err) {
+        console.error("[MCP] command error:", err);
+      }
     }
   };
   ws.onclose = () => {
@@ -168,7 +240,15 @@ async function connect() {
 }
 
 function sendResponse(id, result, error) {
-  const msg = { id: id, result: result, error: error };
+  let msg;
+  if (error === undefined || error === null) {
+    msg = { type: "response", id: id, ok: true, result: (result === undefined ? null : result) };
+  } else if (typeof error === "string") {
+    msg = { type: "response", id: id, ok: false, error: { code: "plugin_error", message: error } };
+  } else {
+    msg = { type: "response", id: id, ok: false,
+      error: { code: error.code || "plugin_error", message: error.message || "plugin error" } };
+  }
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(msg));
   }

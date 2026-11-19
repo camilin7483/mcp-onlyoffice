@@ -17,8 +17,8 @@ func TestToolDefinitionsContract(t *testing.T) {
 	h := &ToolHandlers{}
 	defs := h.Definitions()
 
-	if len(defs) != 71 {
-		t.Fatalf("Definitions() len = %d, want exactly 71", len(defs))
+	if len(defs) != 72 {
+		t.Fatalf("Definitions() len = %d, want exactly 72", len(defs))
 	}
 
 	seen := make(map[string]struct{}, len(defs))

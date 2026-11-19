@@ -7,10 +7,10 @@ export MCP_ONLYOFFICE_TOOLSET=professional
 ```
 
 You can also set `"toolset": "professional"` in the server config. The default
-`legacy` profile registers all 71 tools. The selected profile determines which
+`legacy` profile registers all 72 tools. The selected profile determines which
 tools the MCP server lists and accepts calls for.
 
-## Professional profile (17 tools)
+## Professional profile (18 tools)
 
 | Tool | Permission | Idempotent | Destructive | World |
 |---|---|---|---|---|
@@ -30,6 +30,7 @@ tools the MCP server lists and accepts calls for.
 | `insert_text` | write | no | no | closed |
 | `get_selected_text` | read | yes | no | closed |
 | `open_document` | write | no | no | closed |
+| `list_editor_sessions` | read | yes | no | closed |
 | `health` | read | yes | no | closed |
 
 Filesystem, archive, Python engine, planner, agent, workflow and self-improvement
@@ -50,7 +51,7 @@ authorization rules.
 ## Compatibility and deprecation
 
 - The legacy profile retains its existing tool names. The professional profile
-  uses the same names for its 17 tools.
+  uses the same names for its 18 tools.
 - Tool errors carry human-readable text with `isError=true`. Clients should
   check individual outputs in a report pack for per-file errors.
 

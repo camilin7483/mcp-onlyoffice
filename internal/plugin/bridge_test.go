@@ -3,17 +3,20 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cam/mcp-onlyoffice/internal/version"
 	"github.com/coder/websocket"
 )
 
@@ -30,7 +33,7 @@ func serveBridge(t *testing.T, b *Bridge) *httptest.Server {
 	u, _ := url.Parse(srv.URL)
 	_, port, _ := net.SplitHostPort(u.Host)
 	p, _ := strconv.Atoi(port)
-	b.realPort = p
+	b.setRealPort(p)
 	return srv
 }
 
@@ -62,6 +65,9 @@ func dialWS(t *testing.T, rawurl string, origin, bearer string) *websocket.Conn 
 }
 
 func TestTokenPersistedWith0600(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	b := NewBridge(2021)
@@ -112,7 +118,7 @@ func TestAllowedWSOrigin(t *testing.T) {
 
 func TestPingNoAuth(t *testing.T) {
 	b, _ := testBridge(t)
-	b.realPort = 2021
+	b.setRealPort(2021)
 	srv := serveBridge(t, b)
 	res, err := http.Get(srv.URL + "/ping")
 	if err != nil {
@@ -129,8 +135,8 @@ func TestPingNoAuth(t *testing.T) {
 	if body["app"] != AppName || body["version"] != BridgeVersion {
 		t.Fatalf("unexpected body: %v", body)
 	}
-	if int(body["port"].(float64)) != b.realPort {
-		t.Fatalf("port = %v, want %d", body["port"], b.realPort)
+	if int(body["port"].(float64)) != b.ListenPort() {
+		t.Fatalf("port = %v, want %d", body["port"], b.ListenPort())
 	}
 	if strings.Contains(string(mustJSON(body)), b.Token()) {
 		t.Fatal("/ping must not leak the token")
@@ -232,47 +238,23 @@ func TestWebSocketRejectsBrowserOrigin(t *testing.T) {
 	}
 }
 
-func TestSecondClientClosesFirst(t *testing.T) {
+func TestSecondClientCoexists(t *testing.T) {
 	b, _ := testBridge(t)
 	srv := serveBridge(t, b)
-	a := dialWS(t, wsURL(srv, b.Token()), "", "")
-	deadline := time.Now().Add(3 * time.Second)
-	for !b.IsConnected() && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
+	a, sessA := helloConnect(t, srv, b, "inst-a", "word", wordCaps(), version.BridgeProtocol)
+	second, sessB := helloConnect(t, srv, b, "inst-b", "word", wordCaps(), version.BridgeProtocol)
+	if sessA == sessB {
+		t.Fatal("session ids must differ")
 	}
-	if !b.IsConnected() {
-		t.Fatal("first client not registered")
+	if n := b.reg.Count(); n != 2 {
+		t.Fatalf("sessions = %d, want 2 (second client must not evict the first)", n)
 	}
-	second := dialWS(t, wsURL(srv, b.Token()), "", "")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, _, err := a.Read(ctx)
-	if err == nil {
-		t.Fatal("first connection should have been closed by the second client")
+	// Both sessions stay usable.
+	if v := roundtrip(t, a, b, sessA, "ping", "pong-a"); v != "pong-a" {
+		t.Fatalf("session A result = %v, want pong-a", v)
 	}
-	if !b.IsConnected() {
-		t.Fatal("bridge should still be connected via the second client")
-	}
-	// The surviving connection must still serve commands (no silent steal).
-	go func() {
-		_, data, err := second.Read(context.Background())
-		if err != nil {
-			return
-		}
-		var cmd Command
-		if err := json.Unmarshal(data, &cmd); err != nil {
-			return
-		}
-		raw, _ := json.Marshal(Response{ID: cmd.ID, Result: "pong"})
-		_ = second.Write(context.Background(), websocket.MessageText, raw)
-	}()
-	res, err := b.SendCommand(context.Background(), "ping", nil, 5*time.Second)
-	if err != nil {
-		t.Fatalf("SendCommand via second client: %v", err)
-	}
-	if res != "pong" {
-		t.Fatalf("result = %v, want pong", res)
+	if v := roundtrip(t, second, b, sessB, "ping", "pong-b"); v != "pong-b" {
+		t.Fatalf("session B result = %v, want pong-b", v)
 	}
 }
 
@@ -290,11 +272,7 @@ func TestSendCommandNoConnection(t *testing.T) {
 func TestSendCommandFailsOnDisconnect(t *testing.T) {
 	b, _ := testBridge(t)
 	srv := serveBridge(t, b)
-	c := dialWS(t, wsURL(srv, b.Token()), "", "")
-	deadline := time.Now().Add(3 * time.Second)
-	for !b.IsConnected() && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-	}
+	c, _ := helloConnect(t, srv, b, "inst-disc", "word", wordCaps(), version.BridgeProtocol)
 	type outcome struct {
 		res any
 		err error
@@ -304,7 +282,7 @@ func TestSendCommandFailsOnDisconnect(t *testing.T) {
 		res, err := b.SendCommand(context.Background(), "ping", nil, 10*time.Second)
 		done <- outcome{res, err}
 	}()
-	time.Sleep(200 * time.Millisecond) // let the command go in-flight
+	_ = readCommand(t, c, 5*time.Second) // let the command go in-flight
 	c.Close(websocket.StatusNormalClosure, "bye")
 	select {
 	case o := <-done:
@@ -313,6 +291,13 @@ func TestSendCommandFailsOnDisconnect(t *testing.T) {
 		}
 		if o.res != nil {
 			t.Fatalf("result = %v, want nil on disconnect", o.res)
+		}
+		var rpc *RPCError
+		if !errors.As(o.err, &rpc) {
+			t.Fatalf("error is %T (%v), want *RPCError", o.err, o.err)
+		}
+		if !rpc.OutcomeUnknown {
+			t.Error("disconnect after write must carry OutcomeUnknown=true")
 		}
 	case <-time.After(8 * time.Second):
 		t.Fatal("SendCommand did not return after disconnect")

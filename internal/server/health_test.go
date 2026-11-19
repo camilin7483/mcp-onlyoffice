@@ -3,10 +3,12 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/cam/mcp-onlyoffice/internal/config"
 	"github.com/cam/mcp-onlyoffice/internal/engine"
 	"github.com/cam/mcp-onlyoffice/internal/plugin"
 	"github.com/cam/mcp-onlyoffice/internal/storage"
@@ -148,5 +150,74 @@ func TestPythonEngineUnavailableNoPanic(t *testing.T) {
 		if txt := resultText(t, r2); !strings.Contains(txt, "python engine unavailable") {
 			t.Fatalf("%s: error must name the missing dependency, got: %s", name, txt)
 		}
+	}
+}
+
+// healthyPythonBridge starts a fake runner reporting one capability, so
+// Health sees a live backend with capabilities.
+func healthyPythonBridge(t *testing.T) *engine.Bridge {
+	t.Helper()
+	const script = `#!/usr/bin/env python3
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    rid = req.get("id")
+    cap = req.get("capability", "")
+    if cap == "__list__":
+        print(json.dumps({"id": rid, "status": "ok", "data": [
+            {"capability": "test.echo", "description": "echo"}]}), flush=True)
+    elif cap == "__version__":
+        print(json.dumps({"id": rid, "status": "ok",
+            "data": {"version": "1.0.0"}}), flush=True)
+    else:
+        print(json.dumps({"id": rid, "status": "ok", "data": {}}), flush=True)
+`
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "runner.py"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b := engine.NewBridge(dir)
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	return b
+}
+
+func TestHealthHealthyBackends(t *testing.T) {
+	h, _ := healthFixture(t, healthyPythonBridge(t))
+	h.pythonAvailable = true
+	// Mirror server.New: an existing desktop binary marks the backend ready.
+	desk := filepath.Join(t.TempDir(), "desktopeditors")
+	if err := os.WriteFile(desk, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(desk); err == nil {
+		h.desktopAvailable = true
+	}
+	m, _ := healthMap(t, h)
+	if m["python_available"] != true {
+		t.Errorf("python_available = %v, want true", m["python_available"])
+	}
+	if m["desktop_available"] != true {
+		t.Errorf("desktop_available = %v, want true", m["desktop_available"])
+	}
+	if got := m["python_capabilities"]; got != float64(1) {
+		t.Errorf("python_capabilities = %v, want 1", got)
+	}
+}
+
+func TestHealthProfessionalToolset(t *testing.T) {
+	h, _ := healthFixture(t, failedPythonBridge(t))
+	h.toolset = config.ToolsetProfessional
+	m, _ := healthMap(t, h)
+	if m["toolset"] != config.ToolsetProfessional {
+		t.Errorf("toolset = %v, want professional", m["toolset"])
+	}
+	if got, want := m["tools_registered"], float64(len(ProfessionalToolNames)); got != want {
+		t.Errorf("tools_registered = %v, want %v", got, want)
 	}
 }

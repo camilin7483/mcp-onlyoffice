@@ -56,8 +56,13 @@ func TestManifestVersionAndGUID(t *testing.T) {
 	if err := InstallPluginFiles(); err != nil {
 		t.Fatalf("InstallPluginFiles: %v", err)
 	}
-	raw, err := os.ReadFile(filepath.Join(home, ".local", "share", "onlyoffice",
-		"desktopeditors", "sdkjs-plugins", pluginFolder, "config.json"))
+	// Read through PluginDir (not a HOME-joined path): os.UserHomeDir
+	// ignores HOME on Windows, so rebuilding the path here would diverge.
+	dir, err := PluginDir()
+	if err != nil {
+		t.Fatalf("PluginDir: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
 	if err != nil {
 		t.Fatalf("read config.json: %v", err)
 	}

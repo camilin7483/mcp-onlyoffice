@@ -147,3 +147,12 @@ func (h *ToolHandlers) handleGetAllContent(ctx context.Context, args map[string]
 	}
 	return jsonResult(map[string]any{"content": result}), nil
 }
+
+// handleListEditorSessions lists live plugin sessions (read-only snapshot:
+// ids, editor types, capabilities, revision counters; no secrets).
+func (h *ToolHandlers) handleListEditorSessions(_ context.Context, _ map[string]any) (*mcp.CallToolResult, error) {
+	if h.bridge == nil {
+		return textError("plugin not connected"), nil
+	}
+	return jsonResult(map[string]any{"sessions": h.bridge.Sessions()}), nil
+}

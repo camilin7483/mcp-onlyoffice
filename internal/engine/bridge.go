@@ -15,6 +15,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/cam/mcp-onlyoffice/internal/version"
 )
 
 // DefaultEngineTimeout bounds every request to the Python engine.
@@ -174,6 +176,16 @@ func (b *Bridge) startLocked(ctx context.Context) error {
 
 // doStartLocked starts or restarts the Python subprocess. Caller must hold b.mu.
 func (b *Bridge) doStartLocked(ctx context.Context) error {
+	return b.doStartWithProtocolCheckLocked(ctx, true)
+}
+
+// doStartWithProtocolCheckLocked spawns the engine and verifies it. When
+// check is true it also compares the runner's __version__ against
+// version.EngineProtocol, logging drift without failing. A failed version
+// probe kills the fresh process (executeLocked always resyncs on transport
+// errors), so it restarts once without the probe: startup still leaves a
+// live backend. Caller must hold b.mu.
+func (b *Bridge) doStartWithProtocolCheckLocked(ctx context.Context, check bool) error {
 	// If already initialized and the process is alive, do nothing.
 	if b.initialized && b.processAlive() {
 		return nil
@@ -261,6 +273,23 @@ func (b *Bridge) doStartLocked(ctx context.Context) error {
 		slog.Warn("list capabilities on startup", "error", err)
 	} else {
 		b.capabilities = caps
+	}
+
+	// EngineProtocol drift check: the runner reports its NDJSON protocol
+	// version via __version__. A mismatch is logged, never fatal, so an
+	// older or newer runner keeps working while the drift is visible.
+	if check {
+		if vresp, verr := b.executeLocked(engCtx, "__version__", map[string]any{}); verr != nil {
+			slog.Debug("engine __version__ query failed, restarting without the probe", "error", verr)
+			return b.doStartWithProtocolCheckLocked(ctx, false)
+		} else if vresp != nil && vresp.Status == "ok" {
+			if m, ok := vresp.Data.(map[string]any); ok {
+				if v, _ := m["version"].(string); v != "" && v != version.EngineProtocol {
+					slog.Warn("python engine protocol drift",
+						"engine", v, "want", version.EngineProtocol)
+				}
+			}
+		}
 	}
 
 	slog.Info("python engine bridge started",

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -215,6 +216,10 @@ func TestCancelBeforeWriteNoSpawn(t *testing.T) {
 	}
 	if b2.cmd == nil || b2.cmd.Process.Pid != pid {
 		t.Fatal("live process must survive a pre-write cancellation")
+	}
+	// processAlive uses Signal(0), which is invalid on Windows.
+	if runtime.GOOS == "windows" {
+		t.Skip("Signal(0) liveness probe is Unix-only")
 	}
 	if !b2.processAlive() {
 		t.Fatal("engine should still be alive")

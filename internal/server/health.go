@@ -93,10 +93,14 @@ func (h *ToolHandlers) handleHealth(_ context.Context, _ map[string]any) (*mcp.C
 	return textResult(string(b)), nil
 }
 
-// requirePythonEngine returns a tool error when the python backend is down,
-// nil when Execute may proceed. Handlers must call it before touching pyBridge.
+// requirePythonEngine returns a tool error when the python backend was not
+// configured at startup, nil when Execute may proceed. It gates on the
+// stable startup flag (engine started and reported capabilities), never on
+// the live process: a timeout or cancel kills the process but the flag stays
+// true and Execute lazily restarts it. Handlers must call it before touching
+// pyBridge.
 func (h *ToolHandlers) requirePythonEngine() *mcp.CallToolResult {
-	if h.pyBridge == nil || !h.pyBridge.Available() {
+	if h.pyBridge == nil || !h.pythonAvailable {
 		return textError("python engine unavailable: python engine backend is not available (runner.py missing or failed to start)")
 	}
 	return nil

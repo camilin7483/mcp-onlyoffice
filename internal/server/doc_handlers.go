@@ -26,11 +26,12 @@ func (h *ToolHandlers) prepareWrite(path string, overwrite bool) (string, *mcp.C
 		if !overwrite {
 			return "", textError("file exists: " + path + " (pass overwrite=true)")
 		}
-		if fi.Mode().IsRegular() {
-			bak := resolved + ".bak-" + storage.BackupTimestamp()
-			if err := writeBackup(resolved, bak); err != nil {
-				return "", textError("backup write: " + err.Error())
-			}
+		if !fi.Mode().IsRegular() {
+			return "", textError("refusing to back up non-regular file: " + path)
+		}
+		bak := resolved + ".bak-" + storage.BackupTimestamp()
+		if err := writeBackup(resolved, bak); err != nil {
+			return "", textError("backup write: " + err.Error())
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(resolved), 0o755); err != nil {
@@ -260,15 +261,15 @@ func (h *ToolHandlers) handleWritePresentation(ctx context.Context, args map[str
 		return textError("no valid slides provided"), nil
 	}
 
+	if bad := h.requirePythonEngine(); bad != nil {
+		return bad, nil
+	}
 	resolved, bad := h.prepareWrite(path, args["overwrite"] == true)
 	if bad != nil {
 		return bad, nil
 	}
 	path = resolved
 
-	if bad := h.requirePythonEngine(); bad != nil {
-		return bad, nil
-	}
 	resp, err := h.pyBridge.Execute(ctx, "presentations.create_from_slides", map[string]any{
 		"path": path, "slides": slides, "theme": theme,
 	})
