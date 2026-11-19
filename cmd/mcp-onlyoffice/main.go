@@ -14,6 +14,7 @@ import (
 
 func main() {
 	configPath := flag.String("config", "", "path to config.json")
+	pluginDir := flag.String("plugin-dir", "", "override directory for the ONLYOFFICE plugin files")
 	showHelp := flag.Bool("help", false, "show usage")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -31,13 +32,17 @@ Usage:
 
 Flags:
   -config path   Path to config.json (optional, uses defaults + env vars)
+  -plugin-dir dir Override directory for the ONLYOFFICE plugin files
+                 (wins over config file and MCP_ONLYOFFICE_PLUGIN_DIR)
   -help          Show this help
   -version       Print version and exit
 
 Environment variables:
   MCP_ONLYOFFICE_PLUGIN_PORT    Plugin WebSocket port (default: 2021)
+  MCP_ONLYOFFICE_PLUGIN_DIR     Plugin install directory (override with -plugin-dir)
   MCP_ONLYOFFICE_STORAGE_PATH   Document storage directory
   MCP_ONLYOFFICE_DESKTOP_PATH   Path to DesktopEditors binary
+  MCP_ONLYOFFICE_BUILDER_PATH   Path to Document Builder binary (optional)
 
 The server communicates with the AI agent via MCP stdio protocol,
 and with the ONLYOFFICE plugin via WebSocket on localhost.
@@ -64,6 +69,9 @@ Example config.json:
 		}
 	}
 
+	// The -plugin-dir flag wins over the config file and the environment.
+	applyPluginDirFlag(cfg, *pluginDir)
+
 	logLevel := slog.LevelInfo
 	switch cfg.LogLevel {
 	case "debug":
@@ -89,5 +97,13 @@ Example config.json:
 	if err := app.Run(); err != nil {
 		slog.Error("run error", "error", err)
 		os.Exit(1)
+	}
+}
+
+// applyPluginDirFlag records flag precedence (flag > config/env) in one
+// testable place; main passes the parsed -plugin-dir value through.
+func applyPluginDirFlag(cfg *config.Config, pluginDir string) {
+	if pluginDir != "" {
+		cfg.PluginDir = pluginDir
 	}
 }

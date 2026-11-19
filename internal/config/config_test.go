@@ -105,3 +105,25 @@ func TestBuilderPathEnvAndFile(t *testing.T) {
 		t.Fatalf("BuilderPath = %q, want /opt/db", loaded.BuilderPath)
 	}
 }
+
+func TestPluginDirEnvAndFile(t *testing.T) {
+	t.Setenv("MCP_ONLYOFFICE_PLUGIN_DIR", "/tmp/custom-plugins")
+	cfg := Default()
+	cfg.ApplyEnv()
+	if cfg.PluginDir != "/tmp/custom-plugins" {
+		t.Fatalf("PluginDir = %q, want the env value", cfg.PluginDir)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"plugin_dir": "/opt/plugins"}`), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("MCP_ONLYOFFICE_PLUGIN_DIR", "")
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.PluginDir != "/opt/plugins" {
+		t.Fatalf("PluginDir = %q, want /opt/plugins", loaded.PluginDir)
+	}
+}

@@ -4,6 +4,52 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-11-19
+
+### Added
+
+- Bridge protocol v2 with a versioned hello handshake (`hello` /
+  `hello_ack`, `version.BridgeProtocol = 2`); the plugin reconnects with
+  backoff and scans loopback ports 2021–2070 (`internal/plugin/`).
+- Authenticated pairing: per-launch token (`0600`), single-use IP-bound
+  nonces with a 60 s TTL, loopback-only pairing endpoints and origin gates
+  (`internal/plugin/bridge.go`).
+- Editor session registry: one session per connected editor, capability
+  advertisement per editor type, targeted `SendTo` delivery
+  (`internal/plugin/registry.go`, `internal/server/plugin_handlers.go`).
+- Typed operations (`internal/operations/`): strict decode
+  (`DecodeOperation`), operation registry, risk-based approval policy,
+  revision conflict detection (`CheckRevision`), and a transaction state
+  machine (`prepared → committed | rolled_back | unknown_outcome`) with a
+  settlement receipt.
+- `document_operation` MCP tool: six registered operations — four in-place
+  OOXML file edits with preservation (paragraph replace/insert/style,
+  XLSX cell set; unknown parts such as `customXml` kept byte-identical)
+  and two desktop `writer.*` edits — with dry-run, revision check, atomic
+  write with `.bak-` backup, and in-memory validation before any write.
+- Optional Document Builder backend (`internal/builder/`, `builder_render`
+  tool): detection never fails, absence only disables the tool, argv-only
+  exec with minimal env, throwaway workdir, path and size containment.
+- Reproducibility benchmark (`cmd/bench`, `make benchmark`,
+  `docs/benchmark.md`): generated corpus with manifest hashes, validation,
+  preservation, conflict, rollback, latency, security-negative, crash and
+  timeout suites with environment capture.
+- Fuzz and hardening suites: hostile OOXML inputs (zip-slip, DTD entity,
+  truncation), storage and operation decode fuzzing, bridge negative
+  tests. Desktop editor commands still need interactive verification.
+
+### Changed
+
+- Plugin install path is portable: `plugin_dir` config field
+  (`plugin_dir` JSON), `MCP_ONLYOFFICE_PLUGIN_DIR` env var, and a
+  `-plugin-dir` CLI flag that wins over both. Non-Linux platforms report
+  the missing override as a startup warning instead of a fabricated path,
+  and the server keeps serving when the plugin cannot be installed.
+- `health` reports `core_ready`, `python_available`, `desktop_available`,
+  `builder_available`, `document_server_available`, version, toolset and
+  counts (no paths or secrets); the startup log records whether the plugin
+  was installed and where.
+
 ## [2.1.0] — 2026-11-19
 
 ### Added

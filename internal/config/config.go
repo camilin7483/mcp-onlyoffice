@@ -19,6 +19,7 @@ const (
 
 type Config struct {
 	PluginPort   int      `json:"plugin_port"`
+	PluginDir    string   `json:"plugin_dir"`
 	StoragePath  string   `json:"storage_path"`
 	DesktopPath  string   `json:"desktop_path"`
 	BuilderPath  string   `json:"builder_path"`
@@ -54,6 +55,9 @@ func (c *Config) ApplyEnv() {
 	}
 	if v := os.Getenv("MCP_ONLYOFFICE_BUILDER_PATH"); v != "" {
 		c.BuilderPath = v
+	}
+	if v := os.Getenv("MCP_ONLYOFFICE_PLUGIN_DIR"); v != "" {
+		c.PluginDir = v
 	}
 	if v := os.Getenv("MCP_ONLYOFFICE_LOG_LEVEL"); v != "" {
 		c.LogLevel = v

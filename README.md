@@ -18,7 +18,7 @@ The server uses stdio for MCP and a loopback WebSocket for the Desktop Editors p
 - **Tool profiles.** The default `legacy` profile registers 74 tools. The `professional` profile registers 20 focused document tools. Both publish MCP tool annotations. See the [profile reference](docs/TOOL_PROFILES.md).
 - **Degraded startup.** Storage is the only fatal dependency. A missing editor or Python engine no longer stops the server; the `health` tool reports `core_ready`, `python_available`, `desktop_available`, `builder_available` and `document_server_available`, and the affected tools return a clear error.
 - **Reports.** DOCX sections accept images. Report output names are sanitized and replacing an existing output requires `overwrite: true`.
-- **Desktop pairing.** The plugin installs into the editor's GUID directory, discovers the loopback bridge, and reconnects automatically. Pairing and the WebSocket handshake were verified in a headless Desktop Editors session. Editor commands still require interactive verification.
+- **Desktop pairing.** The plugin installs into the editor's GUID directory (override with `-plugin-dir`, `plugin_dir` config, or `MCP_ONLYOFFICE_PLUGIN_DIR`), discovers the loopback bridge, and reconnects automatically. Bridge pairing is covered by automated tests; editor commands still need interactive verification (see [compatibility](docs/compatibility.md)).
 - **Local file handling.** Filesystem paths are checked against configured roots, replacements use explicit overwrite flags and backups, and recursive deletion requires opt-in. ZIP processing enforces entry and size limits, and `delete_file` calls, overwrite backups, `append_text` calls, and skipped-symlink listings are recorded in a JSONL audit trail.
 - **Python recovery.** Requests have correlated IDs, a size limit, and a 120-second timeout. A timed-out or canceled worker stops and restarts on demand. The caller receives an unknown-outcome error for the interrupted operation.
 
@@ -118,8 +118,8 @@ The server uses stdio for MCP and a loopback WebSocket for the Desktop Editors p
 | Dependency | Version | Purpose |
 |-----------|---------|---------|
 | Go | 1.25+ | Build core binary |
-| Python | 3.14 verified in CI | Document engine and its [pinned dependencies](python_engine/requirements.txt) |
-| ONLYOFFICE Desktop Editors | 8.x verified | Optional. Enables live editor commands; `health` reports `desktop_available`. |
+| Python | 3.14 (3.14.10 on this machine) | Document engine and its [pinned dependencies](python_engine/requirements.txt) |
+| ONLYOFFICE Desktop Editors | 9.0.4.50 present on this machine; 8.x not tested here | Optional. Enables live editor commands; `health` reports `desktop_available`. See [compatibility](docs/compatibility.md). |
 
 ### From Source
 
@@ -148,6 +148,7 @@ The server uses built-in defaults and environment variables. For a JSON configur
 | JSON field | Environment variable | Default |
 |------------|----------------------|---------|
 | `plugin_port` | `MCP_ONLYOFFICE_PLUGIN_PORT` | `2021` |
+| `plugin_dir` | `MCP_ONLYOFFICE_PLUGIN_DIR` | Verified Linux default (`~/.local/share/onlyoffice/desktopeditors/sdkjs-plugins/<GUID>`); override with `-plugin-dir`, which wins over both |
 | `storage_path` | `MCP_ONLYOFFICE_STORAGE_PATH` | `~/mcp-onlyoffice/documents` |
 | `desktop_path` | `MCP_ONLYOFFICE_DESKTOP_PATH` | Auto-detected Desktop Editors binary |
 | `log_level` | `MCP_ONLYOFFICE_LOG_LEVEL` | `info` |
@@ -292,6 +293,15 @@ These tables list selected legacy tools. The server registers the tools in the c
 | `document_agent` | Create report with templates |
 | `planner` | Plan+execute complex task |
 | `list_capabilities` | List Python engine capabilities |
+| `builder_render` | Convert/render a document via the optional Document Builder backend |
+| `health` | Core and backend readiness as JSON |
+| `document_operation` | Typed document mutation with dry-run, revision check, backup, receipt |
+| `list_editor_sessions` | List connected editor sessions |
+
+The professional profile registers 20 tools; the four above plus the
+document, spreadsheet, presentation, report, analysis, validation, editor,
+and `open_document` tools are listed in the
+[profile reference](docs/TOOL_PROFILES.md#professional-profile-20-tools).
 
 ### Tier 3 — Advanced
 
@@ -309,6 +319,10 @@ These tables list selected legacy tools. The server registers the tools in the c
 | `operational_memory` | Performance stats + history |
 | `discover` | Find capabilities by keyword |
 | `self_improve` | Analyze + suggest improvements |
+| `builder_render` | Convert/render via the optional Document Builder backend |
+| `health` | Core and backend readiness as JSON |
+| `document_operation` | Typed mutation with dry-run, revision check, backup, receipt |
+| `list_editor_sessions` | List connected editor sessions |
 
 ---
 
@@ -469,9 +483,45 @@ PATH="$(pwd)/.venv/bin:$PATH" python3 -m unittest discover -s python_engine
 
 ## Known Issues
 
-- **Interactive editor commands.** Desktop Editors under Xvfb paired and opened the authenticated WebSocket. The editor command API was unavailable in that session. `get_selected_text` and `replace_text` still need verification in an interactive Desktop Editors session.
+- **Interactive editor commands.** Bridge pairing is covered by automated tests, but `get_selected_text` and `replace_text` against a live editor still need verification in an interactive Desktop Editors session.
+- **Plugin install path.** Only the Linux plugins directory is built in. On other platforms pass `-plugin-dir` (or `plugin_dir` / `MCP_ONLYOFFICE_PLUGIN_DIR`); the server logs a warning and keeps serving when the plugin cannot be installed.
 - **Plugin port discovery.** The bundled plugin scans ports 2021–2070. A custom port or random fallback outside that range requires a matching change to the plugin.
 - **Document validation.** The OOXML validator checks ZIP/XML structure and metadata. Visual rendering can be checked in Desktop Editors.
+
+## Benchmark
+
+`make benchmark` runs the reproducibility bench (`cmd/bench`, full detail in
+[docs/benchmark.md](docs/benchmark.md)). Latest run on this machine
+(Linux amd64, i3-1215U, ONLYOFFICE 9.0.4.50, no builder binary):
+
+- Validation: **0 errors on 5 fixtures**.
+- Unrequested change rate: **0** (4 in-place samples; PPTX has no in-place
+  editor and is skipped).
+- Conflict detection: **1.0 on 200 cases**; rollback **1.0 on 67 attempts**
+  (unknown-outcome reporting 1.0 on 33 attempts).
+- 0 panics, 0 timeouts. All numbers are machine-specific; compare only
+  identical hardware and software.
+
+## Limitations (UNVERIFIED)
+
+- Live editor commands in an interactive Desktop Editors session.
+- Any specific MCP client app (only the go-sdk wiring in this repo was run).
+- ONLYOFFICE 8.x on this tree (9.0.4.50 is what's installed here).
+- Windows / macOS interactive use (cross-compiled and `go vet` only).
+- `builder_render` against a real Document Builder binary (none present here).
+- Real office open of generated files (the validator is structural).
+
+See [docs/compatibility.md](docs/compatibility.md) for the full list.
+
+## Further reading
+
+- [Backends](docs/backends.md) — the four execution paths and tool mapping.
+- [Transactions](docs/transactions.md) — operation lifecycle and receipts.
+- [Benchmark](docs/benchmark.md) — metrics, environment, non-goals.
+- [Compatibility](docs/compatibility.md) — tested vs UNVERIFIED.
+- [Prior art](docs/prior-art.md) — related projects; no code copied.
+- [Threat model](docs/threat-model.md) and [security](docs/security.md) —
+  as-implemented guarantees and gaps.
 
 ## Troubleshooting
 

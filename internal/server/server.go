@@ -61,8 +61,16 @@ func New(ctx context.Context, cfg *config.Config) (*MCPOnlyOffice, error) {
 
 	bridge := plugin.NewBridge(cfg.PluginPort)
 
-	if err := plugin.InstallPluginFiles(); err != nil {
-		slog.Warn("install plugin files", "error", err)
+	// The plugin install never fails startup: resolve the configured dir
+	// (flag > env/config > verified Linux default) and keep serving when
+	// it cannot be installed. On non-Linux without -plugin-dir the
+	// resolver only warns, per plugin.ResolvePluginDir.
+	if dir, err := plugin.ResolvePluginDir(cfg.PluginDir); err != nil {
+		slog.Warn("plugin dir unresolved, continuing without plugin install", "error", err)
+	} else if err := plugin.InstallPluginFilesTo(dir); err != nil {
+		slog.Warn("plugin install failed, continuing without plugin", "dir", dir, "error", err)
+	} else {
+		slog.Info("plugin installed", "dir", dir)
 	}
 
 	exeDir := filepath.Dir(os.Args[0])

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/cam/mcp-onlyoffice/internal/version"
 )
@@ -18,6 +20,11 @@ const pluginFolder = "{B0A5F3C2-6A5D-4F0B-9D71-2C3B4E5F6071}"
 const pluginVersion = version.Version
 
 func PluginDir() (string, error) {
+	// Only the Linux path below was ever verified. Other platforms must
+	// pass an explicit directory with -plugin-dir instead.
+	if runtime.GOOS != "linux" {
+		return "", fmt.Errorf("no verified plugin dir on %s: pass -plugin-dir <dir>", runtime.GOOS)
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("home dir: %w", err)
@@ -25,21 +32,39 @@ func PluginDir() (string, error) {
 	return filepath.Join(home, ".local", "share", "onlyoffice", "desktopeditors", "sdkjs-plugins", pluginFolder), nil
 }
 
+// ResolvePluginDir returns the override when set (flag wins over config),
+// otherwise the verified platform default from PluginDir.
+func ResolvePluginDir(override string) (string, error) {
+	if strings.TrimSpace(override) != "" {
+		return override, nil
+	}
+	return PluginDir()
+}
+
 func InstallPluginFiles() error {
 	dir, err := PluginDir()
 	if err != nil {
 		return err
 	}
+	return InstallPluginFilesTo(dir)
+}
+
+// InstallPluginFilesTo writes config.json + index.html into dir, creating
+// it when possible. Mkdir/write failures name the -plugin-dir override.
+func InstallPluginFilesTo(dir string) error {
+	if strings.TrimSpace(dir) == "" {
+		return fmt.Errorf("empty plugin dir: pass -plugin-dir <dir>")
+	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("mkdir plugin dir: %w", err)
+		return fmt.Errorf("mkdir plugin dir %s (override with -plugin-dir): %w", dir, err)
 	}
 
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(pluginConfigJSON()), 0644); err != nil {
-		return fmt.Errorf("write config.json: %w", err)
+		return fmt.Errorf("write config.json in %s (override with -plugin-dir): %w", dir, err)
 	}
 
 	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte(pluginIndexHTML()), 0644); err != nil {
-		return fmt.Errorf("write index.html: %w", err)
+		return fmt.Errorf("write index.html in %s (override with -plugin-dir): %w", dir, err)
 	}
 
 	return nil

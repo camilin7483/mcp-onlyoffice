@@ -1,0 +1,84 @@
+# Release (tags `v*` only; never runs on pull requests)
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test ./... -count=1
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, windows, darwin]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          go build -trimpath -ldflags "-s -w" \
+            -o "mcp-onlyoffice-${{ matrix.goos }}-${{ matrix.goarch }}$( [ '${{ matrix.goos }}' = windows ] && echo .exe )" \
+            ./cmd/mcp-onlyoffice
+      - name: SHA256
+        run: sha256sum mcp-onlyoffice-* > SHA256SUMS
+      - uses: anchore/sbom-action@9246b90769f852b3a8921f330c59e0b3f439d6e9 # v0.20.1
+        with:
+          artifact-name: sbom-${{ matrix.goos }}-${{ matrix.goarch }}.spdx.json
+          output-file: sbom-${{ matrix.goos }}-${{ matrix.goarch }}.spdx.json
+      - name: Attest binary
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: mcp-onlyoffice-${{ matrix.goos }}-${{ matrix.goarch }}*
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            mcp-onlyoffice-*
+            SHA256SUMS
+            sbom-*.spdx.json
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+      - name: Checksums
+        run: sha256sum mcp-onlyoffice-* sbom-*.spdx.json > SHA256SUMS
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: |
+            mcp-onlyoffice-*
+            SHA256SUMS
+            sbom-*.spdx.json
