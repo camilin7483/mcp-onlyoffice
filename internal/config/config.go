@@ -21,6 +21,7 @@ type Config struct {
 	PluginPort   int      `json:"plugin_port"`
 	StoragePath  string   `json:"storage_path"`
 	DesktopPath  string   `json:"desktop_path"`
+	BuilderPath  string   `json:"builder_path"`
 	LogLevel     string   `json:"log_level"`
 	AllowedRoots []string `json:"allowed_roots"`
 	Toolset      string   `json:"toolset"`
@@ -50,6 +51,9 @@ func (c *Config) ApplyEnv() {
 	}
 	if v := os.Getenv("MCP_ONLYOFFICE_DESKTOP_PATH"); v != "" {
 		c.DesktopPath = v
+	}
+	if v := os.Getenv("MCP_ONLYOFFICE_BUILDER_PATH"); v != "" {
+		c.BuilderPath = v
 	}
 	if v := os.Getenv("MCP_ONLYOFFICE_LOG_LEVEL"); v != "" {
 		c.LogLevel = v

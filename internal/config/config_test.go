@@ -83,3 +83,25 @@ func TestEffectiveAllowedRoots(t *testing.T) {
 		t.Fatalf("filtered roots = %v, want [/tmp/a]", roots)
 	}
 }
+
+func TestBuilderPathEnvAndFile(t *testing.T) {
+	t.Setenv("MCP_ONLYOFFICE_BUILDER_PATH", "/tmp/fake-docbuilder")
+	cfg := Default()
+	cfg.ApplyEnv()
+	if cfg.BuilderPath != "/tmp/fake-docbuilder" {
+		t.Fatalf("BuilderPath = %q, want the env value", cfg.BuilderPath)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"builder_path": "/opt/db"}`), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("MCP_ONLYOFFICE_BUILDER_PATH", "")
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.BuilderPath != "/opt/db" {
+		t.Fatalf("BuilderPath = %q, want /opt/db", loaded.BuilderPath)
+	}
+}

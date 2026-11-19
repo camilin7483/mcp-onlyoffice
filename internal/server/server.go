@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	auditlog "github.com/cam/mcp-onlyoffice/internal/audit"
+	"github.com/cam/mcp-onlyoffice/internal/builder"
 	"github.com/cam/mcp-onlyoffice/internal/config"
 	"github.com/cam/mcp-onlyoffice/internal/desktoped"
 	"github.com/cam/mcp-onlyoffice/internal/engine"
@@ -81,6 +82,16 @@ func New(ctx context.Context, cfg *config.Config) (*MCPOnlyOffice, error) {
 	tools := NewToolHandlers(store, desktopPath, bridge, pyBridge, cache, registry)
 	tools.SetAllowedRoots(cfg.EffectiveAllowedRoots()...)
 	tools.SetAuditLogger(auditlog.NewSilent(cfg.StoragePath))
+	// Optional Document Builder backend: detection never fails and an absent
+	// binary only disables builder tools, never the core.
+	bld := builder.Detect(cfg.BuilderPath)
+	bld.SetRoots(cfg.EffectiveAllowedRoots())
+	tools.SetBuilder(bld)
+	if bld.Available() {
+		slog.Info("document builder backend ready", "path", bld.Path())
+	} else {
+		slog.Warn("document builder not found, continuing without builder backend")
+	}
 	tools.toolset = cfg.EffectiveToolset()
 	tools.desktopAvailable = desktopAvailable
 

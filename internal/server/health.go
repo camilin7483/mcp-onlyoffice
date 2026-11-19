@@ -29,8 +29,6 @@ type Health struct {
 
 // Health builds the current readiness snapshot. It never fails: each flag
 // degrades independently so the core stays queryable without backends.
-//
-// BuilderAvailable is always false until Phase E adds a builder backend.
 func (h *ToolHandlers) Health() Health {
 	toolset := h.toolset
 	if toolset == "" {
@@ -54,7 +52,7 @@ func (h *ToolHandlers) Health() Health {
 		CoreReady:               true,
 		PythonAvailable:         h.pythonAvailable,
 		DesktopAvailable:        h.desktopAvailable,
-		BuilderAvailable:        false,
+		BuilderAvailable:        h.builder != nil && h.builder.Available(),
 		DocumentServerAvailable: docServer,
 		Version:                 version.Version,
 		BridgeProtocol:          version.BridgeProtocol,

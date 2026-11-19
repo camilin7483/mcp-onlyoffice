@@ -15,7 +15,7 @@ The server uses stdio for MCP and a loopback WebSocket for the Desktop Editors p
 
 ### What changed
 
-- **Tool profiles.** The default `legacy` profile registers 72 tools. The `professional` profile registers 18 focused document tools. Both publish MCP tool annotations. See the [profile reference](docs/TOOL_PROFILES.md).
+- **Tool profiles.** The default `legacy` profile registers 74 tools. The `professional` profile registers 20 focused document tools. Both publish MCP tool annotations. See the [profile reference](docs/TOOL_PROFILES.md).
 - **Degraded startup.** Storage is the only fatal dependency. A missing editor or Python engine no longer stops the server; the `health` tool reports `core_ready`, `python_available`, `desktop_available`, `builder_available` and `document_server_available`, and the affected tools return a clear error.
 - **Reports.** DOCX sections accept images. Report output names are sanitized and replacing an existing output requires `overwrite: true`.
 - **Desktop pairing.** The plugin installs into the editor's GUID directory, discovers the loopback bridge, and reconnects automatically. Pairing and the WebSocket handshake were verified in a headless Desktop Editors session. Editor commands still require interactive verification.
@@ -39,7 +39,7 @@ The server uses stdio for MCP and a loopback WebSocket for the Desktop Editors p
 │  ┌─────────────────┐   ┌──────────────────────────┐     │
 │  │  cmd/           │   │  internal/server/         │     │
 │  │  main.go        │──▶│  - server.go (MCP)       │     │
-│  │  (entry point)  │   │  - tools.go (72 tools)   │     │
+│  │  (entry point)  │   │  - tools.go (74 tools)   │     │
 │  └─────────────────┘   │  - *handlers.go          │     │
 │                        │  - discovery.go (tiers)  │     │
 │                        │  - cache.go              │     │
@@ -224,7 +224,7 @@ The Python engine generated this chart from fictional data and embedded it in a 
 
 ## Tool Reference
 
-These tables list selected legacy tools. The server registers the tools in the chosen profile at startup. See the [18 professional tools](docs/TOOL_PROFILES.md#professional-profile-18-tools).
+These tables list selected legacy tools. The server registers the tools in the chosen profile at startup. See the [20 professional tools](docs/TOOL_PROFILES.md#professional-profile-20-tools).
 
 ### Tier 1 — Essential
 
@@ -378,7 +378,7 @@ mcp-onlyoffice/
 │   │   └── index.go             # Plugin files installer
 │   ├── server/
 │   │   ├── server.go            # MCP server core
-│   │   ├── tools.go              # 72 tool definitions
+│   │   ├── tools.go              # 74 tool definitions
 │   │   ├── doc_handlers.go      # Document creation handlers
 │   │   ├── plugin_handlers.go   # Plugin interaction handlers
 │   │   ├── engine_handlers.go   # Python engine + planner handlers

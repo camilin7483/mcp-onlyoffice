@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cam/mcp-onlyoffice/internal/builder"
 	"github.com/cam/mcp-onlyoffice/internal/config"
 	"github.com/cam/mcp-onlyoffice/internal/engine"
 	"github.com/cam/mcp-onlyoffice/internal/plugin"
@@ -219,5 +220,42 @@ func TestHealthProfessionalToolset(t *testing.T) {
 	}
 	if got, want := m["tools_registered"], float64(len(ProfessionalToolNames)); got != want {
 		t.Errorf("tools_registered = %v, want %v", got, want)
+	}
+}
+
+// TestHealthBuilderBackend: unavailable by default, available once a builder
+// binary is wired through config.
+func TestHealthBuilderBackend(t *testing.T) {
+	h, _ := healthFixture(t, failedPythonBridge(t))
+	if m, _ := healthMap(t, h); m["builder_available"] != false {
+		t.Fatalf("builder_available = %v, want false without a builder", m["builder_available"])
+	}
+
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "docbuilder")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho docbuilder-test 0.0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b := builder.Detect(fake)
+	b.SetRoots(h.effectiveRoots())
+	h.SetBuilder(b)
+	if m, _ := healthMap(t, h); m["builder_available"] != true {
+		t.Errorf("builder_available = %v, want true with a fake builder path", m["builder_available"])
+	}
+
+	// builder_render is registered and reports unavailable cleanly (no panic)
+	// when the backend is missing.
+	h.SetBuilder(builder.Detect(filepath.Join(t.TempDir(), "no-such-binary")))
+	r, err := h.handleBuilderRender(context.Background(), map[string]any{
+		"input": "x", "output": "y",
+	})
+	if err != nil {
+		t.Fatalf("handler returned Go error (must return tool error): %v", err)
+	}
+	if !r.IsError {
+		t.Fatal("expected IsError when the builder is unavailable")
+	}
+	if txt := resultText(t, r); !strings.Contains(txt, "document builder unavailable") {
+		t.Fatalf("error must name the missing backend, got: %s", txt)
 	}
 }

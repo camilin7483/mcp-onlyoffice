@@ -8,7 +8,9 @@ import (
 
 	"github.com/cam/mcp-onlyoffice/internal/agent"
 	"github.com/cam/mcp-onlyoffice/internal/analyzer"
+	"github.com/cam/mcp-onlyoffice/internal/builder"
 	"github.com/cam/mcp-onlyoffice/internal/engine"
+	"github.com/cam/mcp-onlyoffice/internal/operations"
 	"github.com/cam/mcp-onlyoffice/internal/planner"
 	"github.com/cam/mcp-onlyoffice/internal/plugin"
 	"github.com/cam/mcp-onlyoffice/internal/storage"
@@ -32,12 +34,16 @@ type ToolHandlers struct {
 	improvement *planner.Improvement
 	cache       *SessionCache
 	registry    *ToolRegistry
+	opRegistry  *operations.Registry
+	opPolicy    *operations.Policy
 	// toolset is the active profile ("legacy" default, "professional" opt-in).
 	toolset string
 	// desktopAvailable and pythonAvailable record backend readiness from
 	// server.New. The core serves degraded tools when either is false.
 	desktopAvailable bool
 	pythonAvailable  bool
+	// builder is the optional Document Builder backend (nil-safe).
+	builder *builder.Builder
 }
 
 func NewToolHandlers(store *storage.LocalStore, desktopPath string, bridge *plugin.Bridge, pyBridge *engine.Bridge, cache *SessionCache, registry *ToolRegistry) *ToolHandlers {
@@ -164,7 +170,9 @@ func (h *ToolHandlers) Definitions() []toolDef {
 		{Name: "operational_memory", Description: "Performance stats + task history.", InputSchema: inputSchema(map[string]any{}, nil), Handler: h.handleOperationalMemory},
 		{Name: "discover", Description: "Find capabilities/modules by keyword.", InputSchema: inputSchema(map[string]any{"query": map[string]any{"type": "string", "desc": "Search keyword"}}, nil), Handler: h.handleDiscover},
 		{Name: "self_improve", Description: "Analyze performance and suggest improvements.", InputSchema: inputSchema(map[string]any{}, nil), Handler: h.handleSelfImprove},
+		{Name: "builder_render", Description: "Convert/render a document with the optional Document Builder backend (mode convert default, render needs format).", InputSchema: inputSchema(map[string]any{"input": map[string]any{"type": "string", "desc": "Input file path"}, "output": map[string]any{"type": "string", "desc": "Output file path"}, "format": map[string]any{"type": "string", "desc": "Output format (render mode)"}, "mode": map[string]any{"type": "string", "desc": "convert/render", "enum": []string{"convert", "render"}}}, []string{"input", "output"}), Handler: h.handleBuilderRender},
 		{Name: "health", Description: "Report core and backend readiness as JSON.", InputSchema: inputSchema(map[string]any{}, nil), Handler: h.handleHealth},
+		{Name: "document_operation", Description: "Apply a typed document operation (OOXML file edit or desktop editor) with dry-run, revision check, backup and receipt.", InputSchema: inputSchema(map[string]any{"operation": map[string]any{"type": "string", "desc": "Operation name, e.g. ooxml.docx.replace_paragraph_text"}, "target": map[string]any{"type": "object", "desc": "Target: path, paragraph, session_id, document_id"}, "params": map[string]any{"type": "object", "desc": "Operation params"}, "expected_revision": map[string]any{"type": "string", "desc": "Digest from a previous receipt"}, "dry_run": map[string]any{"type": "boolean", "desc": "Preview without writing"}}, []string{"operation", "target"}), Handler: h.handleDocumentOperation},
 	}
 }
 

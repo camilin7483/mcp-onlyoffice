@@ -7,7 +7,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// ProfessionalToolNames es el perfil reducido de 18 herramientas.
+// ProfessionalToolNames es el perfil reducido de 20 herramientas.
 var ProfessionalToolNames = []string{
 	"create_word_document",
 	"create_spreadsheet",
@@ -26,7 +26,9 @@ var ProfessionalToolNames = []string{
 	"get_selected_text",
 	"open_document",
 	"list_editor_sessions",
+	"builder_render",
 	"health",
+	"document_operation",
 }
 
 // IsProfessionalTool indica si el nombre pertenece al perfil profesional.
