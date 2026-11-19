@@ -3,6 +3,7 @@ CONFIG_DIR := ${HOME}/.config/mcp-onlyoffice
 STORAGE_DIR := ${HOME}/mcp-onlyoffice/documents
 
 .PHONY: all build clean install uninstall run
+.PHONY: test vet lint ci
 
 all: build
 
@@ -29,3 +30,16 @@ run: build
 
 dev:
 	go run ./cmd/mcp-onlyoffice
+
+test:
+	go test ./... -count=1
+	python3 -m pytest python_engine -q
+
+vet:
+	go vet ./...
+
+lint:
+	@test -z "$$(gofmt -l .)" || (gofmt -l .; exit 1)
+	go vet ./...
+
+ci: build lint test
