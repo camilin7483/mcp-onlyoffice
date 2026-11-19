@@ -16,6 +16,7 @@ import (
 	"github.com/cam/mcp-onlyoffice/internal/engine"
 	"github.com/cam/mcp-onlyoffice/internal/plugin"
 	"github.com/cam/mcp-onlyoffice/internal/storage"
+	"github.com/cam/mcp-onlyoffice/internal/version"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -226,7 +227,7 @@ func (s *MCPOnlyOffice) Run() error {
 
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "mcp-onlyoffice",
-		Version: "2.0.0",
+		Version: version.Version,
 	}, nil)
 
 	allDefs := s.tools.Definitions()

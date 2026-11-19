@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/cam/mcp-onlyoffice/internal/version"
 )
 
 const pluginGUID = "asc.{B0A5F3C2-6A5D-4F0B-9D71-2C3B4E5F6071}"
@@ -12,7 +14,8 @@ const pluginGUID = "asc.{B0A5F3C2-6A5D-4F0B-9D71-2C3B4E5F6071}"
 const pluginFolder = "{B0A5F3C2-6A5D-4F0B-9D71-2C3B4E5F6071}"
 
 // pluginVersion must match BridgeVersion and the MCP server version.
-const pluginVersion = "2.0.0"
+// It aliases version.Version, the single source of truth.
+const pluginVersion = version.Version
 
 func PluginDir() (string, error) {
 	home, err := os.UserHomeDir()
@@ -31,7 +34,21 @@ func InstallPluginFiles() error {
 		return fmt.Errorf("mkdir plugin dir: %w", err)
 	}
 
-	config := `{
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(pluginConfigJSON()), 0644); err != nil {
+		return fmt.Errorf("write config.json: %w", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte(pluginIndexHTML()), 0644); err != nil {
+		return fmt.Errorf("write index.html: %w", err)
+	}
+
+	return nil
+}
+
+// pluginConfigJSON builds config.json without touching the filesystem,
+// so tests can assert on it without writing to $HOME.
+func pluginConfigJSON() string {
+	return `{
   "name": "MCP Bridge",
   "nameLocale": {
     "en": "MCP Bridge"
@@ -58,15 +75,6 @@ func InstallPluginFiles() error {
   ]
 }
 `
-	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(config), 0644); err != nil {
-		return fmt.Errorf("write config.json: %w", err)
-	}
-
-	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte(pluginIndexHTML()), 0644); err != nil {
-		return fmt.Errorf("write index.html: %w", err)
-	}
-
-	return nil
 }
 
 // pluginIndexHTML is the embedded bridge page. Kept in a function so tests

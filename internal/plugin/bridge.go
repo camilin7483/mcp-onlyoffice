@@ -17,12 +17,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cam/mcp-onlyoffice/internal/version"
 	"github.com/coder/websocket"
 )
 
 // BridgeVersion identifies this bridge to the plugin scanner and must match
 // the plugin manifest version and the MCP server version.
-const BridgeVersion = "2.0.0"
+// It is an alias of version.Version, the single source of truth.
+var BridgeVersion = version.Version
 
 // AppName identifies this bridge in /ping and /pair responses so the plugin
 // scanner only connects to the real mcp-onlyoffice process.
@@ -187,7 +189,7 @@ func (b *Bridge) handlePing(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, map[string]any{"app": AppName, "port": b.realPort, "version": BridgeVersion})
+	writeJSON(w, map[string]any{"app": AppName, "port": b.realPort, "version": BridgeVersion, "protocol": version.BridgeProtocol})
 }
 
 // handlePair hands the per-launch token to a local pairing client. Only

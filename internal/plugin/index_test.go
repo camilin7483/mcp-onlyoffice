@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/cam/mcp-onlyoffice/internal/version"
 )
 
 func TestPluginHTMLDiscovery(t *testing.T) {
@@ -66,7 +68,17 @@ func TestManifestVersionAndGUID(t *testing.T) {
 	if cfg["guid"] != pluginGUID || !strings.HasPrefix(pluginGUID, "asc.{") {
 		t.Fatalf("GUID changed: %v", cfg["guid"])
 	}
-	if cfg["version"] != BridgeVersion || BridgeVersion != "2.0.0" {
-		t.Fatalf("version = %v, want 2.0.0 matching BridgeVersion", cfg["version"])
+	if cfg["version"] != version.Version || cfg["version"] != BridgeVersion {
+		t.Fatalf("version = %v, want %s matching BridgeVersion", cfg["version"], version.Version)
+	}
+}
+
+func TestPluginConfigVersion(t *testing.T) {
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(pluginConfigJSON()), &cfg); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	if cfg["version"] != version.Version {
+		t.Fatalf("version = %v, want %s", cfg["version"], version.Version)
 	}
 }
