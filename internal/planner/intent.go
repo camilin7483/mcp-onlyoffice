@@ -20,39 +20,39 @@ const (
 )
 
 type Intent struct {
-	Primary   IntentType
-	Secondary []IntentType
-	Entities  map[string]string
-	Outputs   []string
+	Primary    IntentType
+	Secondary  []IntentType
+	Entities   map[string]string
+	Outputs    []string
 	Confidence float64
 }
 
 var intentSignals = map[IntentType][]string{
-	IntentCreateWorkbook:    {"spreadsheet", "workbook", "xlsx", "excel", "sheet", "table data", "csv to excel", "formula", "pivot"},
-	IntentCreateChart:       {"chart", "graph", "plot", "bar", "line chart", "pie", "histogram", "heatmap", "visualize", "visualization"},
-	IntentCreateDocument:    {"document", "docx", "report", "letter", "memo", "word", "write", "create doc", "text file"},
+	IntentCreateWorkbook:     {"spreadsheet", "workbook", "xlsx", "excel", "sheet", "table data", "csv to excel", "formula", "pivot"},
+	IntentCreateChart:        {"chart", "graph", "plot", "bar", "line chart", "pie", "histogram", "heatmap", "visualize", "visualization"},
+	IntentCreateDocument:     {"document", "docx", "report", "letter", "memo", "word", "write", "create doc", "text file"},
 	IntentCreatePresentation: {"presentation", "pptx", "slide", "powerpoint", "deck", "slideshow"},
-	IntentAnalyzeData:       {"analyze", "analysis", "statistics", "kpi", "predict", "forecast", "aggregate", "summarize", "calculate"},
-	IntentCreateDashboard:   {"dashboard", "kpi sheet", "summary dashboard", "executive dashboard", "metrics board", "kpi dashboard", "dash"},
-	IntentCreatePDF:         {"pdf", "export pdf", "to pdf", "pdf document"},
-	IntentProcessImage:      {"image", "picture", "photo", "screenshot", "convert image", "resize", "crop"},
-	IntentConvertFormat:     {"convert", "transform", "change format", "export as", "save as"},
-	IntentGenerateReport:    {"generate report", "monthly report", "annual report", "business report", "status report", "project report"},
-	IntentBatchProcess:      {"batch", "multiple", "bulk", "all files", "process all", "convert all"},
+	IntentAnalyzeData:        {"analyze", "analysis", "statistics", "kpi", "predict", "forecast", "aggregate", "summarize", "calculate"},
+	IntentCreateDashboard:    {"dashboard", "kpi sheet", "summary dashboard", "executive dashboard", "metrics board", "kpi dashboard", "dash"},
+	IntentCreatePDF:          {"pdf", "export pdf", "to pdf", "pdf document"},
+	IntentProcessImage:       {"image", "picture", "photo", "screenshot", "convert image", "resize", "crop"},
+	IntentConvertFormat:      {"convert", "transform", "change format", "export as", "save as"},
+	IntentGenerateReport:     {"generate report", "monthly report", "annual report", "business report", "status report", "project report"},
+	IntentBatchProcess:       {"batch", "multiple", "bulk", "all files", "process all", "convert all"},
 }
 
 var intentPriority = map[IntentType]int{
-	IntentCreateWorkbook:    10,
-	IntentCreateChart:       10,
+	IntentCreateWorkbook:     10,
+	IntentCreateChart:        10,
 	IntentCreatePresentation: 10,
-	IntentAnalyzeData:       10,
-	IntentCreateDashboard:   20,
-	IntentCreatePDF:         30,
-	IntentProcessImage:      35,
-	IntentConvertFormat:     30,
-	IntentGenerateReport:    20,
-	IntentBatchProcess:      20,
-	IntentCreateDocument:    5,
+	IntentAnalyzeData:        10,
+	IntentCreateDashboard:    20,
+	IntentCreatePDF:          30,
+	IntentProcessImage:       35,
+	IntentConvertFormat:      30,
+	IntentGenerateReport:     20,
+	IntentBatchProcess:       20,
+	IntentCreateDocument:     5,
 }
 
 func AnalyzeIntent(objective string) Intent {
@@ -169,16 +169,16 @@ func cleanEntity(s string) string {
 }
 
 var capabilityByIntent = map[IntentType][]string{
-	IntentCreateWorkbook:    {"excel.create_workbook", "excel.insert_data"},
-	IntentCreateChart:       {"charts.bar_chart", "charts.line_chart", "charts.pie_chart", "charts.heatmap"},
-	IntentCreateDocument:    {"documents.create_report", "documents.create_document"},
+	IntentCreateWorkbook:     {"excel.create_workbook", "excel.insert_data"},
+	IntentCreateChart:        {"charts.bar_chart", "charts.line_chart", "charts.pie_chart", "charts.heatmap"},
+	IntentCreateDocument:     {"documents.create_report", "documents.create_document"},
 	IntentCreatePresentation: {"presentations.create_presentation"},
-	IntentAnalyzeData:       {"analytics.statistics", "analytics.aggregate", "analytics.frequency"},
-	IntentCreateDashboard:   {"excel.kpi_sheet"},
-	IntentCreatePDF:         {"pdf.create_pdf"},
-	IntentProcessImage:      {"images.convert", "images.resize"},
-	IntentGenerateReport:    {"documents.create_report", "excel.insert_data", "charts.bar_chart"},
-	IntentBatchProcess:      {"excel.create_workbook", "documents.create_report", "presentations.create_presentation"},
+	IntentAnalyzeData:        {"analytics.statistics", "analytics.aggregate", "analytics.frequency"},
+	IntentCreateDashboard:    {"excel.kpi_sheet"},
+	IntentCreatePDF:          {"pdf.create_pdf"},
+	IntentProcessImage:       {"images.convert", "images.resize"},
+	IntentGenerateReport:     {"documents.create_report", "excel.insert_data", "charts.bar_chart"},
+	IntentBatchProcess:       {"excel.create_workbook", "documents.create_report", "presentations.create_presentation"},
 }
 
 func SelectCapabilities(intent Intent, available map[string]string) []string {

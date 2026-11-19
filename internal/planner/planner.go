@@ -274,12 +274,12 @@ func (p *Planner) expandDashboard(base []PlanStep, params map[string]any) []Plan
 }
 
 type StepResult struct {
-	StepID     string      `json:"step_id"`
-	Capability string      `json:"capability"`
-	Status     string      `json:"status"`
-	Data       any         `json:"data,omitempty"`
-	Error      string      `json:"error,omitempty"`
-	Duration   string      `json:"duration"`
+	StepID     string `json:"step_id"`
+	Capability string `json:"capability"`
+	Status     string `json:"status"`
+	Data       any    `json:"data,omitempty"`
+	Error      string `json:"error,omitempty"`
+	Duration   string `json:"duration"`
 }
 
 type ExecutionResult struct {

@@ -25,8 +25,8 @@ type WorkflowDef struct {
 }
 
 type Engine struct {
-	store   storage.Store
-	agent   *agent.DocumentAgent
+	store     storage.Store
+	agent     *agent.DocumentAgent
 	workflows map[string]*WorkflowDef
 }
 
@@ -74,10 +74,10 @@ func (e *Engine) Execute(ctx context.Context, name string, params map[string]any
 				Duration: duration,
 			})
 			return &Result{
-				Workflow:  name,
-				Steps:     stepResults,
-				Duration:  time.Since(start).Round(time.Millisecond).String(),
-				FailedAt:  step.Name,
+				Workflow: name,
+				Steps:    stepResults,
+				Duration: time.Since(start).Round(time.Millisecond).String(),
+				FailedAt: step.Name,
 			}, nil
 		}
 
@@ -104,10 +104,10 @@ type StepResult struct {
 }
 
 type Result struct {
-	Workflow  string       `json:"workflow"`
-	Steps     []StepResult `json:"steps"`
-	Duration  string       `json:"duration"`
-	FailedAt  string       `json:"failed_at,omitempty"`
+	Workflow string       `json:"workflow"`
+	Steps    []StepResult `json:"steps"`
+	Duration string       `json:"duration"`
+	FailedAt string       `json:"failed_at,omitempty"`
 }
 
 func (e *Engine) registerBuiltins() {

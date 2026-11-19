@@ -9,9 +9,10 @@ import (
 
 // ToolRegistry manages progressive tool discovery.
 // Instead of registering ALL tools at startup, it groups them into tiers:
-//   Tier 1: Essential (always loaded — file operations, basic CRUD)
-//   Tier 2: Common (loaded on demand — most used tools)
-//   Tier 3: Advanced (loaded only when explicitly needed)
+//
+//	Tier 1: Essential (always loaded — file operations, basic CRUD)
+//	Tier 2: Common (loaded on demand — most used tools)
+//	Tier 3: Advanced (loaded only when explicitly needed)
 //
 // The model receives only Tier 1 descriptions by default.
 // Tier 2/3 tools are registered via discovery requests.

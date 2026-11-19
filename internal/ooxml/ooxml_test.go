@@ -558,6 +558,7 @@ func TestDocxCorporateReport(t *testing.T) {
 		t.Error("default corporate report missing letter page size")
 	}
 }
+
 // TestCorruptFiles ensures truncated or non-ZIP bytes never validate ok.
 func TestCorruptFiles(t *testing.T) {
 	valid := map[string][]byte{}

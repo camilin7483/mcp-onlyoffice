@@ -12,16 +12,16 @@ import (
 )
 
 type Analysis struct {
-	ID         string        `json:"id"`
-	Filename   string        `json:"filename"`
-	MimeType   string        `json:"mime_type"`
-	Size       int64         `json:"size"`
-	Format     string        `json:"format"`
-	Valid      bool          `json:"valid"`
-	Issues     []Issue       `json:"issues,omitempty"`
-	Docx       *DocxAnalysis `json:"docx,omitempty"`
-	Xlsx       *XlsxAnalysis `json:"xlsx,omitempty"`
-	Pptx       *PptxAnalysis `json:"pptx,omitempty"`
+	ID       string        `json:"id"`
+	Filename string        `json:"filename"`
+	MimeType string        `json:"mime_type"`
+	Size     int64         `json:"size"`
+	Format   string        `json:"format"`
+	Valid    bool          `json:"valid"`
+	Issues   []Issue       `json:"issues,omitempty"`
+	Docx     *DocxAnalysis `json:"docx,omitempty"`
+	Xlsx     *XlsxAnalysis `json:"xlsx,omitempty"`
+	Pptx     *PptxAnalysis `json:"pptx,omitempty"`
 }
 
 type Issue struct {

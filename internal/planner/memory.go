@@ -33,10 +33,10 @@ type TaskRecord struct {
 }
 
 type OperationalMemory struct {
-	mu         sync.RWMutex
-	entries    []MemoryEntry
-	tasks      []TaskRecord
-	maxSize    int
+	mu          sync.RWMutex
+	entries     []MemoryEntry
+	tasks       []TaskRecord
+	maxSize     int
 	persistPath string
 }
 
@@ -209,9 +209,9 @@ func (m *OperationalMemory) Stats() map[string]any {
 		"unique_capabilities": len(capCount),
 		"most_used":           mostUsed(capCount),
 		"task_stats": map[string]any{
-			"total":  taskTotal,
-			"ok":     taskSuccesses,
-			"failed": taskErrors,
+			"total":        taskTotal,
+			"ok":           taskSuccesses,
+			"failed":       taskErrors,
 			"success_rate": fmt.Sprintf("%.1f%%", safePercent(taskSuccesses, taskTotal)),
 		},
 		"self_evaluation": m.evaluate(),
@@ -279,11 +279,11 @@ func (m *OperationalMemory) evaluate() map[string]any {
 	sr := float64(successes) / float64(total) * 100
 
 	return map[string]any{
-		"status":                  "evaluated",
-		"success_rate":            fmt.Sprintf("%.1f%%", sr),
-		"avg_duration":            avgDuration.Round(time.Millisecond).String(),
-		"total_tasks":             total,
-		"improvement_suggested":   sr < 80,
+		"status":                "evaluated",
+		"success_rate":          fmt.Sprintf("%.1f%%", sr),
+		"avg_duration":          avgDuration.Round(time.Millisecond).String(),
+		"total_tasks":           total,
+		"improvement_suggested": sr < 80,
 	}
 }
 
@@ -397,12 +397,12 @@ func NewErrorRecovery(memory *OperationalMemory) *ErrorRecovery {
 
 func (er *ErrorRecovery) SuggestAlternative(failedCapability string) []string {
 	alt := map[string][]string{
-		"excel.create_workbook":     {"excel.open_workbook", "excel.insert_data"},
-		"charts.bar_chart":          {"charts.line_chart", "charts.pie_chart"},
-		"charts.line_chart":         {"charts.bar_chart", "charts.financial_chart"},
-		"documents.create_report":   {"documents.create_document", "documents.add_paragraph"},
+		"excel.create_workbook":             {"excel.open_workbook", "excel.insert_data"},
+		"charts.bar_chart":                  {"charts.line_chart", "charts.pie_chart"},
+		"charts.line_chart":                 {"charts.bar_chart", "charts.financial_chart"},
+		"documents.create_report":           {"documents.create_document", "documents.add_paragraph"},
 		"presentations.create_presentation": {"presentations.add_slide"},
-		"analytics.statistics":      {"analytics.aggregate", "analytics.frequency"},
+		"analytics.statistics":              {"analytics.aggregate", "analytics.frequency"},
 	}
 
 	if alts, ok := alt[failedCapability]; ok {
@@ -410,4 +410,3 @@ func (er *ErrorRecovery) SuggestAlternative(failedCapability string) []string {
 	}
 	return nil
 }
-

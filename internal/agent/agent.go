@@ -198,4 +198,3 @@ func sanitizeFilename(name string) string {
 	}
 	return strings.TrimSpace(string(runes))
 }
-

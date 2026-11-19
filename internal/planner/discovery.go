@@ -7,7 +7,7 @@ import (
 )
 
 type CapabilityIndex struct {
-	mu         sync.RWMutex
+	mu           sync.RWMutex
 	capabilities map[string]*CapabilityEntry
 }
 
