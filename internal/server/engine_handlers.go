@@ -10,6 +10,9 @@ import (
 )
 
 func (h *ToolHandlers) handlePythonEngine(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
+	if bad := h.requirePythonEngine(); bad != nil {
+		return bad, nil
+	}
 	capability, _ := args["capability"].(string)
 	if capability == "" {
 		return jsonError("capability is required"), nil
@@ -58,6 +61,9 @@ func (h *ToolHandlers) handlePythonEngine(ctx context.Context, args map[string]a
 }
 
 func (h *ToolHandlers) handlePlanner(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
+	if bad := h.requirePythonEngine(); bad != nil {
+		return bad, nil
+	}
 	objective, _ := args["objective"].(string)
 	if objective == "" {
 		return jsonError("objective is required"), nil
@@ -204,6 +210,9 @@ func (h *ToolHandlers) evaluatePlan(result planner.ExecutionResult) map[string]a
 }
 
 func (h *ToolHandlers) handleListCapabilities(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
+	if bad := h.requirePythonEngine(); bad != nil {
+		return bad, nil
+	}
 	caps := h.pyBridge.Capabilities()
 	byModule := make(map[string][]map[string]string)
 	for _, c := range caps {

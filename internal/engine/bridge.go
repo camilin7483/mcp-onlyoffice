@@ -112,6 +112,10 @@ type Bridge struct {
 	// Timeout bounds each Execute call. Zero means DefaultEngineTimeout.
 	// A timeout kills the engine and returns OutcomeUnknownError.
 	Timeout time.Duration
+	// startErr records the last Start (or restart) outcome. A non-nil value
+	// means the engine is unavailable: Execute refuses to run and
+	// Capabilities stays nil until a later start succeeds.
+	startErr error
 }
 
 // NewBridge creates a new Python Engine bridge.
@@ -139,6 +143,20 @@ func (b *Bridge) runnerPath() string {
 	return p
 }
 
+// Available reports whether the engine started successfully and has not
+// failed since. A bridge whose Start failed (missing runner.py, missing
+// interpreter, spawn error) reports false until a later start succeeds.
+func (b *Bridge) Available() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.availableLocked()
+}
+
+// availableLocked reports start health. Caller must hold b.mu.
+func (b *Bridge) availableLocked() bool {
+	return b.startErr == nil && b.initialized
+}
+
 // Start initializes the Python Engine subprocess.
 func (b *Bridge) Start(ctx context.Context) error {
 	b.mu.Lock()
@@ -146,8 +164,16 @@ func (b *Bridge) Start(ctx context.Context) error {
 	return b.startLocked(ctx)
 }
 
-// startLocked starts or restarts the Python subprocess. Caller must hold b.mu.
+// startLocked starts or restarts the Python subprocess and records the
+// outcome for Available. Caller must hold b.mu.
 func (b *Bridge) startLocked(ctx context.Context) error {
+	err := b.doStartLocked(ctx)
+	b.startErr = err
+	return err
+}
+
+// doStartLocked starts or restarts the Python subprocess. Caller must hold b.mu.
+func (b *Bridge) doStartLocked(ctx context.Context) error {
 	// If already initialized and the process is alive, do nothing.
 	if b.initialized && b.processAlive() {
 		return nil
@@ -162,6 +188,9 @@ func (b *Bridge) startLocked(ctx context.Context) error {
 	runnerPath := b.runnerPath()
 	if runnerPath == "" {
 		return fmt.Errorf("empty engine path: set Bridge enginePath to the python_engine directory or runner.py")
+	}
+	if _, err := os.Stat(runnerPath); err != nil {
+		return fmt.Errorf("python engine runner not found at %s: %w", runnerPath, err)
 	}
 
 	// The engine lifetime is managed solely by killLocked/Stop, never by a
@@ -329,7 +358,13 @@ func (b *Bridge) Execute(ctx context.Context, capability string, params map[stri
 		return nil, fmt.Errorf("capability %q not sent (context done before write): %w", capability, err)
 	}
 
-	// Ensure the engine is alive (restart if needed).
+	// Ensure the engine is alive (restart if needed). A previous failed
+	// start leaves the bridge unavailable: refuse instead of retrying a
+	// known-bad backend. A fresh bridge (never started) still lazily
+	// starts here via ensureAlive.
+	if b.startErr != nil {
+		return nil, fmt.Errorf("python engine unavailable: %w", b.startErr)
+	}
 	if err := b.ensureAlive(ctx); err != nil {
 		return nil, fmt.Errorf("engine restart: %w", err)
 	}
@@ -518,10 +553,14 @@ func (b *Bridge) listCapabilitiesLocked(ctx context.Context) ([]CapabilityInfo, 
 	return caps, nil
 }
 
-// Capabilities returns a copy of the cached list of capabilities.
+// Capabilities returns a copy of the cached list of capabilities, or nil
+// when the engine is unavailable (never started successfully).
 func (b *Bridge) Capabilities() []CapabilityInfo {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if !b.availableLocked() {
+		return nil
+	}
 	out := make([]CapabilityInfo, len(b.capabilities))
 	copy(out, b.capabilities)
 	return out

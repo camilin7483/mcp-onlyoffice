@@ -51,16 +51,16 @@ func TestToolsetEnvValues(t *testing.T) {
 func TestProfessionalSelectionIsExact(t *testing.T) {
 	h := &ToolHandlers{}
 	all := h.Definitions()
-	if len(all) != 70 {
-		t.Fatalf("legacy definitions = %d, want 70", len(all))
+	if len(all) != 71 {
+		t.Fatalf("legacy definitions = %d, want 71", len(all))
 	}
 
 	known := make(map[string]bool, len(all))
 	for _, d := range all {
 		known[d.Name] = true
 	}
-	if len(ProfessionalToolNames) != 16 {
-		t.Fatalf("professional names = %d, want 16", len(ProfessionalToolNames))
+	if len(ProfessionalToolNames) != 17 {
+		t.Fatalf("professional names = %d, want 17", len(ProfessionalToolNames))
 	}
 	seen := make(map[string]bool, 16)
 	for _, n := range ProfessionalToolNames {
@@ -74,8 +74,8 @@ func TestProfessionalSelectionIsExact(t *testing.T) {
 	}
 
 	got := FilterProfessionalTools(all)
-	if len(got) != 16 {
-		t.Fatalf("filtered professional tools = %d, want 16", len(got))
+	if len(got) != 17 {
+		t.Fatalf("filtered professional tools = %d, want 17", len(got))
 	}
 	for _, d := range got {
 		if !seen[d.Name] {

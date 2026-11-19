@@ -195,6 +195,9 @@ func (h *ToolHandlers) handleLoadTier(ctx context.Context, args map[string]any) 
 }
 
 func (h *ToolHandlers) handleCreateReport(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
+	if bad := h.requirePythonEngine(); bad != nil {
+		return bad, nil
+	}
 	title, _ := args["title"].(string)
 	if title == "" {
 		return jsonError("title is required"), nil

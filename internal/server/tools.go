@@ -32,6 +32,12 @@ type ToolHandlers struct {
 	improvement *planner.Improvement
 	cache       *SessionCache
 	registry    *ToolRegistry
+	// toolset is the active profile ("legacy" default, "professional" opt-in).
+	toolset string
+	// desktopAvailable and pythonAvailable record backend readiness from
+	// server.New. The core serves degraded tools when either is false.
+	desktopAvailable bool
+	pythonAvailable  bool
 }
 
 func NewToolHandlers(store *storage.LocalStore, desktopPath string, bridge *plugin.Bridge, pyBridge *engine.Bridge, cache *SessionCache, registry *ToolRegistry) *ToolHandlers {
@@ -157,6 +163,7 @@ func (h *ToolHandlers) Definitions() []toolDef {
 		{Name: "operational_memory", Description: "Performance stats + task history.", InputSchema: inputSchema(map[string]any{}, nil), Handler: h.handleOperationalMemory},
 		{Name: "discover", Description: "Find capabilities/modules by keyword.", InputSchema: inputSchema(map[string]any{"query": map[string]any{"type": "string", "desc": "Search keyword"}}, nil), Handler: h.handleDiscover},
 		{Name: "self_improve", Description: "Analyze performance and suggest improvements.", InputSchema: inputSchema(map[string]any{}, nil), Handler: h.handleSelfImprove},
+		{Name: "health", Description: "Report core and backend readiness as JSON.", InputSchema: inputSchema(map[string]any{}, nil), Handler: h.handleHealth},
 	}
 }
 

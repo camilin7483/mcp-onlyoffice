@@ -27,8 +27,9 @@ func (h *ToolHandlers) prepareWrite(path string, overwrite bool) (string, *mcp.C
 			return "", textError("file exists: " + path + " (pass overwrite=true)")
 		}
 		if fi.Mode().IsRegular() {
-			if old, readErr := os.ReadFile(resolved); readErr == nil {
-				_ = os.WriteFile(resolved+".bak-"+storage.BackupTimestamp(), old, 0o600)
+			bak := resolved + ".bak-" + storage.BackupTimestamp()
+			if err := writeBackup(resolved, bak); err != nil {
+				return "", textError("backup write: " + err.Error())
 			}
 		}
 	}
@@ -265,35 +266,19 @@ func (h *ToolHandlers) handleWritePresentation(ctx context.Context, args map[str
 	}
 	path = resolved
 
-	if h.pyBridge != nil {
-		resp, err := h.pyBridge.Execute(ctx, "presentations.create_from_slides", map[string]any{
-			"path": path, "slides": slides, "theme": theme,
-		})
-		if err != nil {
-			return textError("python engine error: " + err.Error()), nil
-		}
-		if resp.Status == "error" {
-			return textError("presentation creation failed: " + resp.Error), nil
-		}
-		return jsonResult(resp.Data), nil
+	if bad := h.requirePythonEngine(); bad != nil {
+		return bad, nil
 	}
-
-	var slidesData []ooxml.SlideData
-	for _, si := range slidesRaw {
-		if sm, ok := si.(map[string]any); ok {
-			title, _ := sm["title"].(string)
-			content, _ := sm["content"].(string)
-			slidesData = append(slidesData, ooxml.SlideData{Title: title, Content: content})
-		}
-	}
-	data, err := ooxml.CreatePPTXFromSlides(slidesData)
+	resp, err := h.pyBridge.Execute(ctx, "presentations.create_from_slides", map[string]any{
+		"path": path, "slides": slides, "theme": theme,
+	})
 	if err != nil {
-		return textError("create presentation: " + err.Error()), nil
+		return textError("python engine error: " + err.Error()), nil
 	}
-	if err := os.WriteFile(resolved, data, 0o644); err != nil {
-		return textError("write file: " + err.Error()), nil
+	if resp.Status == "error" {
+		return textError("presentation creation failed: " + resp.Error), nil
 	}
-	return jsonResult(map[string]any{"path": resolved, "size": len(data)}), nil
+	return jsonResult(resp.Data), nil
 }
 
 // replaceTextResult maps a replace_text bridge outcome to its MCP result:

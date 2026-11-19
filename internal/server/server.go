@@ -31,12 +31,6 @@ type MCPOnlyOffice struct {
 	ctx      context.Context
 }
 
-type HealthCheck struct {
-	Name   string
-	Passed bool
-	Detail string
-}
-
 func New(ctx context.Context, cfg *config.Config) (*MCPOnlyOffice, error) {
 	if err := os.MkdirAll(cfg.StoragePath, 0755); err != nil {
 		return nil, fmt.Errorf("create storage dir %s: %w", cfg.StoragePath, err)
@@ -50,6 +44,16 @@ func New(ctx context.Context, cfg *config.Config) (*MCPOnlyOffice, error) {
 	desktopPath := desktoped.FindBinary()
 	if cfg.DesktopPath != "" {
 		desktopPath = cfg.DesktopPath
+	}
+	desktopAvailable := false
+	if desktopPath != "" {
+		if _, err := os.Stat(desktopPath); err == nil {
+			desktopAvailable = true
+		} else {
+			slog.Warn("onlyoffice desktop not found, continuing without desktop integration", "path", desktopPath, "error", err)
+		}
+	} else {
+		slog.Warn("onlyoffice desktop not found, continuing without desktop integration")
 	}
 
 	bridge := plugin.NewBridge(cfg.PluginPort)
@@ -68,15 +72,6 @@ func New(ctx context.Context, cfg *config.Config) (*MCPOnlyOffice, error) {
 		}
 	}
 
-	if _, err := os.Stat(filepath.Join(pyEnginePath, "runner.py")); err != nil {
-		return nil, fmt.Errorf(
-			"python engine runner not found at %s\n\n"+
-				"Ensure the python_engine/ directory is next to the mcp-onlyoffice binary.\n"+
-				"Expected: %s/runner.py",
-			pyEnginePath, pyEnginePath,
-		)
-	}
-
 	pyBridge := engine.NewBridge(pyEnginePath)
 	pyBridge.OutputDir = cfg.StoragePath
 	cache := NewSessionCache()
@@ -84,63 +79,43 @@ func New(ctx context.Context, cfg *config.Config) (*MCPOnlyOffice, error) {
 	tools := NewToolHandlers(store, desktopPath, bridge, pyBridge, cache, registry)
 	tools.SetAllowedRoots(cfg.EffectiveAllowedRoots()...)
 	tools.SetAuditLogger(auditlog.NewSilent(cfg.StoragePath))
+	tools.toolset = cfg.EffectiveToolset()
+	tools.desktopAvailable = desktopAvailable
 
+	pythonAvailable := false
 	slog.Info("initializing python engine bridge", "path", pyEnginePath)
-	if err := pyBridge.Start(ctx); err != nil {
-		return nil, fmt.Errorf(
-			"python engine initialization failed\n\n"+
-				"  Engine path: %s\n"+
-				"  Error: %v\n\n"+
-				"Possible causes:\n"+
-				"  - python3 not available in PATH\n"+
-				"  - Missing Python dependencies (run: pip3 install -r %s/requirements.txt)\n"+
-				"  - python_engine/runner.py has a syntax error",
-			pyEnginePath, err, pyEnginePath,
-		)
+	if _, err := os.Stat(filepath.Join(pyEnginePath, "runner.py")); err != nil {
+		slog.Warn("python engine unavailable, continuing with reduced toolset", "path", pyEnginePath, "error", "runner.py not found")
+	} else if err := pyBridge.Start(ctx); err != nil {
+		slog.Warn("python engine unavailable, continuing with reduced toolset", "path", pyEnginePath, "error", err)
+	} else if caps := pyBridge.Capabilities(); len(caps) == 0 {
+		slog.Warn("python engine unavailable, continuing with reduced toolset", "path", pyEnginePath, "error", "engine started but returned 0 capabilities")
+	} else {
+		pythonAvailable = true
+		tools.RegisterPythonCapabilities(pyBridge.Capabilities())
+		slog.Info("python engine bridge ready", "capabilities", len(pyBridge.Capabilities()))
+	}
+	tools.pythonAvailable = pythonAvailable
+
+	health := tools.Health()
+	for _, flag := range []struct {
+		name  string
+		value any
+	}{
+		{"core_ready", health.CoreReady},
+		{"python_available", health.PythonAvailable},
+		{"desktop_available", health.DesktopAvailable},
+		{"builder_available", health.BuilderAvailable},
+		{"document_server_available", health.DocumentServerAvailable},
+		{"storage_writable", health.StorageWritable},
+		{"tools_registered", health.ToolsRegistered},
+		{"python_capabilities", health.PythonCapabilities},
+		{"allowed_roots", health.AllowedRoots},
+	} {
+		slog.Info("startup readiness", "flag", flag.name, "value", flag.value)
 	}
 
-	caps := pyBridge.Capabilities()
-	if len(caps) == 0 {
-		runnerPath := filepath.Join(pyEnginePath, "runner.py")
-		return nil, fmt.Errorf(
-			"python engine started but returned 0 capabilities\n\n"+
-				"  Engine path: %s\n"+
-				"  Runner: %s\n\n"+
-				"Possible causes:\n"+
-				"  - Python modules failed to load (check stderr above)\n"+
-				"  - Missing dependencies: pip3 install -r %s/requirements.txt\n"+
-				"  - __init__.py has import errors",
-			pyEnginePath, runnerPath, pyEnginePath,
-		)
-	}
-
-	slog.Info("python engine bridge ready", "capabilities", len(caps))
-
-	tools.RegisterPythonCapabilities(caps)
-	slog.Info("capabilities registered in planner", "total", tools.capabilitiesCount())
-
-	results := runStartupHealthCheck(tools, pyEnginePath, desktopPath)
-	allPassed := true
-	for _, hc := range results {
-		status := "PASS"
-		if !hc.Passed {
-			status = "FAIL"
-			allPassed = false
-		}
-		slog.Info("health check", "name", hc.Name, "status", status, "detail", hc.Detail)
-	}
-
-	if !allPassed {
-		var details string
-		for _, hc := range results {
-			if !hc.Passed {
-				details += fmt.Sprintf("\n  [FAIL] %s: %s", hc.Name, hc.Detail)
-			}
-		}
-		return nil, fmt.Errorf("startup health checks failed:%s", details)
-	}
-
-	slog.Info("all health checks passed, server ready")
+	slog.Info("core ready, serving with degraded backends where unavailable")
 	return &MCPOnlyOffice{
 		cfg:      cfg,
 		store:    store,
@@ -151,68 +126,6 @@ func New(ctx context.Context, cfg *config.Config) (*MCPOnlyOffice, error) {
 		registry: registry,
 		ctx:      ctx,
 	}, nil
-}
-
-func runStartupHealthCheck(tools *ToolHandlers, pyEnginePath, desktopPath string) []HealthCheck {
-	var results []HealthCheck
-
-	if tools.pyBridge != nil && tools.pyBridge.Capabilities() != nil && len(tools.pyBridge.Capabilities()) > 0 {
-		results = append(results, HealthCheck{
-			Name:   "python_engine_connection",
-			Passed: true,
-			Detail: fmt.Sprintf("%d capabilities loaded from %s", len(tools.pyBridge.Capabilities()), pyEnginePath),
-		})
-	} else {
-		results = append(results, HealthCheck{
-			Name:   "python_engine_connection",
-			Passed: false,
-			Detail: "python engine bridge is nil or has no capabilities",
-		})
-	}
-
-	if tools.capabilitiesCount() > 0 {
-		results = append(results, HealthCheck{
-			Name:   "capability_registration",
-			Passed: true,
-			Detail: fmt.Sprintf("%d capabilities registered in planner discovery", tools.capabilitiesCount()),
-		})
-	} else {
-		results = append(results, HealthCheck{
-			Name:   "capability_registration",
-			Passed: false,
-			Detail: "no capabilities registered in planner discovery — discover will return empty",
-		})
-	}
-
-	if desktopPath != "" {
-		if _, err := os.Stat(desktopPath); err == nil {
-			results = append(results, HealthCheck{
-				Name:   "onlyoffice_desktop",
-				Passed: true,
-				Detail: fmt.Sprintf("found at %s", desktopPath),
-			})
-		} else {
-			results = append(results, HealthCheck{
-				Name:   "onlyoffice_desktop",
-				Passed: false,
-				Detail: fmt.Sprintf("not found at %s: %v", desktopPath, err),
-			})
-		}
-	} else {
-		results = append(results, HealthCheck{
-			Name:   "onlyoffice_desktop",
-			Passed: false,
-			Detail: "DesktopEditors binary not found — is ONLYOFFICE Desktop Editors installed?",
-		})
-	}
-
-	results = append(results, HealthCheck{
-		Name:   "mcp_server",
-		Passed: true,
-		Detail: "ready to accept MCP connections",
-	})
-
-	return results
 }
 
 func (s *MCPOnlyOffice) Run() error {

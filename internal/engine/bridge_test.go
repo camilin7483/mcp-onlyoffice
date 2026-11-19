@@ -259,3 +259,30 @@ var errBadResponse = errTestHelper("bad response")
 type errTestHelper string
 
 func (e errTestHelper) Error() string { return string(e) }
+
+func TestStartFailureUnavailable(t *testing.T) {
+	b := NewBridge(filepath.Join(t.TempDir(), "missing-dir"))
+	defer b.Stop()
+	if b.Available() {
+		t.Fatal("fresh bridge must not report Available()")
+	}
+	if err := b.Start(context.Background()); err == nil {
+		t.Fatal("expected Start to fail against a nonexistent runner")
+	}
+	if b.Available() {
+		t.Fatal("failed bridge must report Available() == false")
+	}
+	if caps := b.Capabilities(); caps != nil {
+		t.Fatalf("failed bridge Capabilities() = %v, want nil", caps)
+	}
+	_, err := b.Execute(context.Background(), "test.echo", nil)
+	if err == nil || !strings.Contains(err.Error(), "python engine unavailable") {
+		t.Fatalf("expected unavailable error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "runner") {
+		t.Fatalf("unavailable error must carry the cause, got: %v", err)
+	}
+	if err := b.Stop(); err != nil {
+		t.Fatalf("Stop must stay safe after failed start: %v", err)
+	}
+}
