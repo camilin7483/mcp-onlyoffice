@@ -30,6 +30,14 @@ type Validator struct {
 	store storage.Store
 }
 
+// Resource caps for validation reads: parts are never buffered past
+// MaxValidatorPartBytes each, and the XML walk stops past
+// MaxValidatorTotalBytes of decompressed content in one Validate call.
+const (
+	MaxValidatorPartBytes  = int64(32 << 20)  // 32 MiB per part
+	MaxValidatorTotalBytes = int64(512 << 20) // 512 MiB total per document
+)
+
 func New(store storage.Store) *Validator {
 	return &Validator{store: store}
 }
@@ -209,8 +217,10 @@ func (v *Validator) checkContentTypes(res *ValidationResult, zr *zip.Reader, ext
 }
 
 // checkXMLWellFormed parses every XML part so malformed markup is caught
-// before the file reaches ONLYOFFICE.
+// before the file reaches ONLYOFFICE. Reads are capped per part and in
+// total so a hostile package cannot force unbounded allocation.
 func (v *Validator) checkXMLWellFormed(res *ValidationResult, zr *zip.Reader) {
+	var total int64
 	for _, f := range zr.File {
 		if !strings.HasSuffix(f.Name, ".xml") && !strings.HasSuffix(f.Name, ".rels") {
 			continue
@@ -220,10 +230,15 @@ func (v *Validator) checkXMLWellFormed(res *ValidationResult, zr *zip.Reader) {
 			res.Checks = append(res.Checks, Check{Name: "ooxml_xml", Status: "fail", Detail: fmt.Sprintf("cannot open %s (%s): archive is corrupt, recreate the file", f.Name, err.Error())})
 			return
 		}
-		content, err := io.ReadAll(rc)
+		content, err := readCapped(rc, f.Name)
 		rc.Close()
 		if err != nil {
 			res.Checks = append(res.Checks, Check{Name: "ooxml_xml", Status: "fail", Detail: fmt.Sprintf("cannot read %s (%s): archive is corrupt, recreate the file", f.Name, err.Error())})
+			return
+		}
+		total += int64(len(content))
+		if total > MaxValidatorTotalBytes {
+			res.Checks = append(res.Checks, Check{Name: "ooxml_xml", Status: "fail", Detail: fmt.Sprintf("package decompresses past the %d byte total limit: file is hostile or corrupt, recreate it from the source", MaxValidatorTotalBytes)})
 			return
 		}
 		if len(content) == 0 {
@@ -319,15 +334,32 @@ func fileExt(filename string) string {
 func readZipPart(zr *zip.Reader, name string) ([]byte, error) {
 	for _, f := range zr.File {
 		if f.Name == name {
+			// Fail fast on a lying-large header before buffering anything.
+			if f.UncompressedSize64 > uint64(MaxValidatorPartBytes) {
+				return nil, fmt.Errorf("part %s exceeds the %d byte limit", name, MaxValidatorPartBytes)
+			}
 			rc, err := f.Open()
 			if err != nil {
 				return nil, err
 			}
 			defer rc.Close()
-			return io.ReadAll(rc)
+			return readCapped(rc, name)
 		}
 	}
 	return nil, fmt.Errorf("part not found: %s", name)
+}
+
+// readCapped buffers one part up to MaxValidatorPartBytes; anything larger
+// is refused with a clear failure instead of being buffered unbounded.
+func readCapped(rc io.Reader, name string) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(rc, MaxValidatorPartBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > MaxValidatorPartBytes {
+		return nil, fmt.Errorf("part %s exceeds the %d byte limit", name, MaxValidatorPartBytes)
+	}
+	return data, nil
 }
 
 // xmlNode captures any element so well-formedness can be verified

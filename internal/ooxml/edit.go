@@ -31,6 +31,15 @@ import (
 
 const maxEditBytes = 64 << 20 // 64 MiB input cap for every edit function
 
+const (
+	// maxEditEntries caps how many parts an edit carries; hostile
+	// packages with thousands of entries are refused before any part is read.
+	maxEditEntries = 2048
+	// maxEditTotalBytes caps total decompressed bytes across all parts of
+	// one edit; a zip bomb of small parts is refused partway through.
+	maxEditTotalBytes = 256 << 20 // 256 MiB
+)
+
 var (
 	paraRe    = regexp.MustCompile(`(?s)<w:p\b[^>]*>.*?</w:p>`)
 	runRe     = regexp.MustCompile(`(?s)<w:r\b[^>]*>.*?</w:r>`)
@@ -87,7 +96,11 @@ func readEditEntries(src []byte) ([]zipEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ooxml: invalid package: %w", err)
 	}
+	if len(zr.File) > maxEditEntries {
+		return nil, fmt.Errorf("ooxml: package has %d entries, over the %d entry limit", len(zr.File), maxEditEntries)
+	}
 	entries := make([]zipEntry, 0, len(zr.File))
+	var total int64
 	for _, f := range zr.File {
 		if f.FileInfo().IsDir() {
 			continue
@@ -103,6 +116,10 @@ func readEditEntries(src []byte) ([]zipEntry, error) {
 		}
 		if int64(len(data)) > maxEditBytes {
 			return nil, fmt.Errorf("ooxml: part %s exceeds the %d byte limit", f.Name, maxEditBytes)
+		}
+		total += int64(len(data))
+		if total > maxEditTotalBytes {
+			return nil, fmt.Errorf("ooxml: package decompresses past the %d byte total limit", maxEditTotalBytes)
 		}
 		entries = append(entries, zipEntry{name: f.Name, method: f.Method, data: data})
 	}

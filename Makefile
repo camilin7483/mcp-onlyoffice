@@ -2,7 +2,7 @@ BINARY := mcp-onlyoffice
 CONFIG_DIR := ${HOME}/.config/mcp-onlyoffice
 STORAGE_DIR := ${HOME}/mcp-onlyoffice/documents
 
-.PHONY: all build clean install uninstall run
+.PHONY: all build clean install uninstall run benchmark
 .PHONY: test vet lint ci
 
 all: build
@@ -43,3 +43,6 @@ lint:
 	go vet ./...
 
 ci: build lint test
+
+benchmark:
+	go run ./cmd/bench

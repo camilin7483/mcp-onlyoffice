@@ -17,6 +17,10 @@ python_engine/__pycache__/
 .venv/
 venv/
 
+# Benchmark results (generated, machine-specific)
+benchmark/results/
+benchmark/corpus/manifest.json
+
 # OS
 .DS_Store
 Thumbs.db

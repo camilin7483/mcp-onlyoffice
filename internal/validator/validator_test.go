@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/cam/mcp-onlyoffice/internal/storage"
@@ -139,4 +140,58 @@ func createMinimalDocx() []byte {
 	}
 	w.Close()
 	return buf.Bytes()
+}
+
+// TestValidateOversizedPart builds a docx whose word/document.xml
+// decompresses past MaxValidatorPartBytes (stored compressed, so the file
+// itself is small): validation must fail clearly on the per-part cap,
+// never buffer unbounded.
+func TestValidateOversizedPart(t *testing.T) {
+	s := newTestStore(t)
+	v := New(s)
+
+	big := bytes.Repeat([]byte("a"), int(MaxValidatorPartBytes)+1<<20)
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	files := map[string]string{
+		"[Content_Types].xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>`,
+		"_rels/.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`,
+	}
+	for name, content := range files {
+		f, _ := w.Create(name)
+		f.Write([]byte(content))
+	}
+	f, _ := w.Create("word/document.xml")
+	f.Write(big)
+	w.Close()
+	t.Logf("oversized file size: %d bytes", buf.Len())
+
+	doc, err := s.Create("big.docx", buf.Bytes())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	res, err := v.Validate(doc.ID)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if res.Valid {
+		t.Fatal("oversized part: want invalid, got valid")
+	}
+	found := false
+	for _, c := range res.Checks {
+		if strings.Contains(c.Detail, "byte limit") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("oversized part: no check names the byte limit: %+v", res.Checks)
+	}
 }
