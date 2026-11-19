@@ -1,36 +1,25 @@
 # MCP-OnlyOffice
 
-**MCP server for ONLYOFFICE** — Create, edit, analyze, and manage office documents (DOCX, XLSX, PPTX, PDF) through natural language using any MCP-compatible AI assistant.
+Local Model Context Protocol (MCP) server for ONLYOFFICE Desktop Editors. Create DOCX, XLSX, PPTX, and PDF files, inspect Office documents, and work with an open editor from a compatible AI assistant.
 
-> Built for [OpenCode](https://opencode.ai), Claude, Cursor, and any MCP client.
+The server uses stdio for MCP and a loopback WebSocket for the Desktop Editors plugin. See the [changelog](CHANGELOG.md) for the project history.
 
 ---
 
 ## Features
 
-- **42 MCP tools** organized in 3 progressive tiers
-- **Hardened ZIP handling** — partial-extract on corrupt archives, ZipSlip guard, caps (10MB/file read, 100 files, 200MB total)
-- **Storage guardrails** — `MaxDocBytes` 10MB cap on document payloads
-- **Pinned Python deps** — `==` pins (openpyxl 3.1.5, python-docx 1.2.0, python-pptx 1.0.2, matplotlib 3.11.0, numpy 2.5.2, Pillow 12.3.0)
-- **OOXML native generator (no repair)** — ordered ZIP, docProps, sectPr, `t=b`, dimension, clrMap — opens clean in ONLYOFFICE/LibreOffice
-- **OOXML validator** — checks ZIP/XML/content_types/rels/metadata with 0–100 score
-- **Hardened engine bridge** — 120s timeout, capability allowlist, no traceback leaked to client
-- **New Python caps** — `excel.formulas`/`conditional`/`embed`, charts at DPI 150 (seaborn), 8-slide blue 16:9 decks + speaker notes, PDF cover + pagination + metadata
-- **Smarter planner** — per-step `expandReport`, persistent cache with deep-copy, `ExecutePlan` retry with alternative capability
-- **Workflow `batch_create`** + **agent `mail_merge`** (all record IDs returned)
-- **Observability** — `jsonError` envelope, JSONL audit log, `MCP_ONLYOFFICE_LOG_LEVEL` env
-- **Document creation** — Word, spreadsheets, presentations from natural language descriptions
-- **ONLYOFFICE Desktop integration** — Open, edit, insert text, create tables and lists in the editor via WebSocket plugin
-- **Python engine** — Charts, analytics, Excel manipulation, PDF generation, image processing
-- **Document storage** — UUID-based local storage with metadata indexing and cross-references
-- **Smart planner** — Intent analysis → capability chain → execution with error recovery
-- **Planner system** — Complex multi-step tasks via natural language objectives
-- **Templates** — Business reports, technical docs, meeting minutes, proposals
-- **Document analyzer** — Structure introspection for DOCX/XLSX/PPTX
-- **OOXML validator** — Structure, metadata, and quality checks
-- **OOXML native generator** — Create documents via raw XML+ZIP (Go, no dependencies)
-- **Cross-document references** — Link related documents together
-- **Self-improvement** — Performance tracking, failure analysis, and improvement suggestions
+- **Document generation.** Create Office files, assemble DOCX/XLSX/PPTX report packs, embed images in DOCX reports, and generate charts and PDFs with the Python engine.
+- **Document management.** Search local storage, analyze DOCX/XLSX/PPTX files, and validate OOXML structure and metadata.
+- **Editor integration.** Open stored documents and send commands such as text insertion and find-and-replace through the Desktop Editors plugin.
+- **Automation.** Run templates, workflows, batch creation, mail merge, and multi-step plans through the legacy profile.
+
+### What changed
+
+- **Tool profiles.** The default `legacy` profile registers 70 tools. The `professional` profile registers 16 focused document tools. Both publish MCP tool annotations. See the [profile reference](docs/TOOL_PROFILES.md).
+- **Reports.** DOCX sections accept images. Report output names are sanitized and replacing an existing output requires `overwrite: true`.
+- **Desktop pairing.** The plugin installs into the editor's GUID directory, discovers the loopback bridge, and reconnects automatically. Pairing and the WebSocket handshake were verified in a headless Desktop Editors session. Editor commands still require interactive verification.
+- **Local file handling.** Filesystem paths are checked against configured roots, replacements use explicit overwrite flags and backups, and recursive deletion requires opt-in. ZIP processing enforces entry and size limits, and filesystem operations have a JSONL audit trail.
+- **Python recovery.** Requests have correlated IDs, a size limit, and a 120-second timeout. A timed-out or canceled worker stops and restarts on demand. The caller receives an unknown-outcome error for the interrupted operation.
 
 ---
 
@@ -49,7 +38,7 @@
 │  ┌─────────────────┐   ┌──────────────────────────┐     │
 │  │  cmd/           │   │  internal/server/         │     │
 │  │  main.go        │──▶│  - server.go (MCP)       │     │
-│  │  (entry point)  │   │  - tools.go (42 tools)   │     │
+│  │  (entry point)  │   │  - tools.go (70 tools)   │     │
 │  └─────────────────┘   │  - *handlers.go          │     │
 │                        │  - discovery.go (tiers)  │     │
 │                        │  - cache.go              │     │
@@ -102,7 +91,7 @@
                                                         │
 ┌─────────────────────────────────────────────────────┐  │
 │  Document Storage (local filesystem)                 │  │
-│  ~/.local/share/mcp-onlyoffice/documents/            │  │
+│  ~/mcp-onlyoffice/documents/ (default)               │  │
 │  └── UUID.data + .metadata.json                     │  │
 └─────────────────────────────────────────────────────┘  │
 ```
@@ -128,74 +117,59 @@
 | Dependency | Version | Purpose |
 |-----------|---------|---------|
 | Go | 1.25+ | Build core binary |
-| Python | 3.10+ | Document engine (charts, Excel, PDF) |
-| ONLYOFFICE Desktop Editors | Latest | Live document editing (optional) |
+| Python | 3.12+ | Document engine and its [pinned dependencies](python_engine/requirements.txt) |
+| ONLYOFFICE Desktop Editors | 8.x verified | Server startup checks for the editor binary. Live commands require a running editor. |
 
 ### From Source
 
 ```bash
-# Clone
 git clone https://github.com/camilin7483/mcp-onlyoffice.git
 cd mcp-onlyoffice
-
-# Build
 make build
-
-# Install
-make install
+python3 -m venv .venv
+.venv/bin/python -m pip install -r python_engine/requirements.txt
+./mcp-onlyoffice -help
 ```
 
-This will:
-- Compile the Go binary
-- Install it to `~/.local/bin/mcp-onlyoffice`
-- Create config directory at `~/.config/mcp-onlyoffice/`
-- Create storage directory at `~/mcp-onlyoffice/documents/`
-- Copy default config if not present
-
-### Python Dependencies
-
-```bash
-pip install -r python_engine/requirements.txt
-```
-
-Or install individually:
-```bash
-pip install openpyxl python-docx python-pptx matplotlib numpy fpdf2 PyPDF2 Pillow
-```
+Use the built binary in the checkout so it can find the adjacent `python_engine/` directory. The server uses `python3` from `PATH`. Configure your MCP client with the virtual environment on that path, as shown below.
 
 ### Configuration
 
-Create `~/.config/mcp-onlyoffice/config.json`:
+The server uses built-in defaults and environment variables. For a JSON configuration, save a file such as `~/.config/mcp-onlyoffice/config.json` and pass it with `-config`. Environment variables override JSON settings.
 
 ```json
 {
-  "plugin_port": 2021,
-  "storage_path": "/home/user/mcp-onlyoffice/documents",
-  "desktop_path": "/opt/onlyoffice/desktopeditors/DesktopEditors",
-  "log_level": "info"
+  "log_level": "info",
+  "toolset": "professional"
 }
 ```
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `plugin_port` | `2021` | WebSocket port for ONLYOFFICE Desktop plugin |
-| `storage_path` | `~/mcp-onlyoffice/documents` | Document storage directory |
-| `desktop_path` | (auto-detect) | Path to DesktopEditors binary |
-| `log_level` | `info` | Log level: debug/info/warn/error |
+| JSON field | Environment variable | Default |
+|------------|----------------------|---------|
+| `plugin_port` | `MCP_ONLYOFFICE_PLUGIN_PORT` | `2021` |
+| `storage_path` | `MCP_ONLYOFFICE_STORAGE_PATH` | `~/mcp-onlyoffice/documents` |
+| `desktop_path` | `MCP_ONLYOFFICE_DESKTOP_PATH` | Auto-detected Desktop Editors binary |
+| `log_level` | `MCP_ONLYOFFICE_LOG_LEVEL` | `info` |
+| `allowed_roots` | `MCP_ONLYOFFICE_ALLOWED_ROOTS` | Effective storage directory |
+| `toolset` | `MCP_ONLYOFFICE_TOOLSET` | `legacy` |
+
+Set `allowed_roots` to an array of absolute directories or use a colon-separated list in the environment variable. Include the storage directory when setting custom roots if tools should access it. Python engine paths stay confined to the storage directory.
 
 ### OpenCode Configuration
 
-Add to your `opencode.jsonc` or `~/.config/opencode/opencode.jsonc`:
+Add this local server to your OpenCode 2 configuration. Replace the example paths with your checkout and virtual environment paths. See the [OpenCode MCP documentation](https://opencode.ai/docs/mcp-servers/#local).
 
 ```jsonc
 {
-  "mcpServers": {
-    "onlyoffice": {
-      "command": "/home/user/.local/bin/mcp-onlyoffice",
-      "args": ["-config", "/home/user/.config/mcp-onlyoffice/config.json"],
-      "env": {
-        "MCP_ONLYOFFICE_PLUGIN_PORT": "2021",
-        "MCP_ONLYOFFICE_STORAGE_PATH": "/home/user/mcp-onlyoffice/documents"
+  "mcp": {
+    "servers": {
+      "onlyoffice": {
+        "type": "local",
+        "command": ["/home/user/mcp-onlyoffice/mcp-onlyoffice"],
+        "environment": {
+          "PATH": "/home/user/mcp-onlyoffice/.venv/bin:{env:PATH}",
+          "MCP_ONLYOFFICE_TOOLSET": "professional"
+        }
       }
     }
   }
@@ -206,17 +180,7 @@ Add to your `opencode.jsonc` or `~/.config/opencode/opencode.jsonc`:
 
 ## Usage
 
-### Starting the Server
-
-```bash
-# From project directory
-./mcp-onlyoffice
-
-# Or with custom config
-./mcp-onlyoffice -config /path/to/config.json
-```
-
-The server starts and listens on **stdin/stdout** (MCP stdio transport). Your AI assistant communicates with it automatically once configured.
+The MCP client starts the server over stdin and stdout. For live editing, start the server once to install the plugin, then restart ONLYOFFICE Desktop Editors and open a document. The background plugin pairs with the server automatically.
 
 ### Quick Start Examples
 
@@ -224,27 +188,49 @@ Once connected, try these with your AI assistant:
 
 | Request | What happens |
 |---------|-------------|
-| "Create a Word document with meeting minutes" | `create_word_document` → generated DOCX |
-| "Make a spreadsheet with sales data" | `create_spreadsheet` → XLSX with headers+rows |
-| "Create a presentation about Q3 results" | `write_presentation` → PPTX with slides+tables |
-| "Open document abc-123 in ONLYOFFICE" | `open_document` → launches Desktop Editor |
-| "Insert a table at the cursor" | `create_table` → table in open document |
-| "Generate a bar chart from this data" | `python_engine` → matplotlib chart |
-| "Create a business report" | `document_agent` → multi-document report |
-| "Analyze document xyz-789" | `analyze_document` → structure breakdown |
-| "What tools are available for charts?" | `discover_tools` → capability search |
-| "Plan a complex task: create project proposal with budget table and timeline" | `planner` → multi-step execution |
+| "Write meeting minutes to `meeting-minutes.docx` in my storage directory" | `write_docx` writes a DOCX with the supplied text |
+| "Build a sales spreadsheet with these rows" | `write_spreadsheet` writes XLSX with headers and rows |
+| "Create a presentation about Q3 results" | `write_presentation` writes PPTX with slides and tables |
+| "Create a quarterly report in the reports folder under my storage directory and include this chart" | `create_report` generates a report pack and embeds the chart in the DOCX |
+| "Analyze this stored document" | `analyze_document` inspects its structure |
+| "Open this stored document in ONLYOFFICE" | `open_document` launches Desktop Editors |
+| "Generate a bar chart from these figures" | `python_engine` runs `charts.bar_chart` in the legacy profile |
+
+### Report images
+
+Place the image in the configured storage directory and set `output_dir` to a subdirectory there. In a `create_report` call, add an image section with `path` (or `image`) and an optional `width_inches` from 0.5 to 12. The default is 6 inches.
+
+```json
+{
+  "title": "Quarterly operations review",
+  "output_dir": "/home/user/mcp-onlyoffice/documents/reports",
+  "sections": [
+    {
+      "type": "image",
+      "heading": "Quarterly shipments",
+      "path": "quarterly-shipments.png",
+      "width_inches": 5.5
+    }
+  ]
+}
+```
+
+The Python engine generated this chart from fictional data and embedded it in a DOCX report.
+
+![Horizontal bar chart showing fictional monthly shipments of 82 in July, 94 in August, and 108 in September](docs/report-chart.png)
 
 ---
 
 ## Tool Reference
 
-### Tier 1 — Essential (loaded at startup)
+These tables list selected legacy tools. The server registers the tools in the chosen profile at startup. See the [16 professional tools](docs/TOOL_PROFILES.md#professional-profile-16-tools).
+
+### Tier 1 — Essential
 
 | Tool | Description | Input |
 |------|-------------|-------|
 | `discover_tools` | Search tools by keyword | `query: string` |
-| `load_tool_tier` | Load Tier 2 or Tier 3 | `tier: number (2\|3)` |
+| `load_tool_tier` | List tools through the selected tier | `tier: number (2\|3)` |
 | `create_document` | Create doc in storage | `filename`, `content?` |
 | `get_document` | Get doc by ID | `id` |
 | `list_documents` | List all stored docs | — |
@@ -333,23 +319,23 @@ The Python engine (`python_engine/`) provides these capability paths for the `py
 |----------------|--------|----------|
 | `excel.create_workbook` | xl | Create workbook with sheets |
 | `excel.insert_data` | xl | Insert rows/columns |
-| `excel.create_kpi_sheet` | xl | KPI dashboard sheet |
-| `excel.insert_formula` | xl | Insert formulas (`excel.formulas`) |
-| `excel.conditional_format` | xl | Conditional formatting (`excel.conditional`) |
-| `charts.embed_in_excel` | charts | Embed chart PNG into workbook (`excel.embed`) |
-| `charts.create_bar_chart` | charts | Bar chart (matplotlib, DPI 150, seaborn style) |
-| `charts.create_line_chart` | charts | Line chart |
-| `charts.create_pie_chart` | charts | Pie chart |
-| `charts.create_heatmap` | charts | Heatmap |
-| `charts.create_financial_chart` | charts | Financial/stock chart |
+| `excel.kpi_sheet` | xl | KPI dashboard sheet |
+| `excel.insert_formula` | xl | Insert a formula |
+| `excel.conditional_format` | xl | Apply conditional formatting |
+| `charts.embed_in_excel` | charts | Embed a chart image in a workbook |
+| `charts.bar_chart` | charts | Bar chart with 150 DPI by default |
+| `charts.line_chart` | charts | Line chart |
+| `charts.pie_chart` | charts | Pie chart |
+| `charts.heatmap` | charts | Heatmap |
+| `charts.financial_chart` | charts | Financial chart |
 | `documents.create_report` | docs | Report with python-docx |
 | `presentations.create_deck` | pres | Slide deck with python-pptx (8-slide blue 16:9 theme + speaker notes) |
-| `analytics.descriptive_stats` | analytics | Mean, median, std dev |
-| `analytics.frequency_analysis` | analytics | Frequency distribution |
-| `analytics.aggregate_data` | analytics | Group and aggregate |
-| `pdf.generate_pdf` | pdf | Generate PDF from text (cover page + pagination + title/author metadata) |
-| `images.convert_image` | images | Format conversion |
-| `images.resize_image` | images | Resize dimensions |
+| `analytics.statistics` | analytics | Mean, median, standard deviation |
+| `analytics.frequency` | analytics | Frequency distribution |
+| `analytics.aggregate` | analytics | Group and aggregate |
+| `pdf.create_pdf` | pdf | Generate PDF from text with cover page, pagination, and metadata |
+| `images.convert` | images | Convert an image to another format |
+| `images.resize` | images | Change image dimensions |
 
 ---
 
@@ -391,7 +377,7 @@ mcp-onlyoffice/
 │   │   └── index.go             # Plugin files installer
 │   ├── server/
 │   │   ├── server.go            # MCP server core
-│   │   ├── tools.go              # 42 tool definitions
+│   │   ├── tools.go              # 70 tool definitions
 │   │   ├── doc_handlers.go      # Document creation handlers
 │   │   ├── plugin_handlers.go   # Plugin interaction handlers
 │   │   ├── engine_handlers.go   # Python engine + planner handlers
@@ -442,7 +428,6 @@ mcp-onlyoffice/
 
 ```bash
 make build        # Build binary
-make install      # Build + install to ~/.local/bin
 make clean        # Remove binary
 make run          # Build + run
 make dev          # go run (no build)
@@ -469,68 +454,32 @@ func (h *ToolHandlers) handleMyTool(ctx context.Context, args map[string]any) (*
 
 1. Create a new directory `python_engine/your_module/`
 2. Add a handler function that takes `params: dict` and returns a result dict
-3. Register it in `python_engine/__init__.py` in the `CAPABILITY_MAP`
+3. Register the engine module in `python_engine/__init__.py`
 
 ### Running Tests
 
 ```bash
-go test ./...           # All Go tests
-go test ./internal/ooxml/   # OOXML tests
-go test ./internal/storage/ # Storage tests
-go test ./internal/planner/ # Planner tests
+go test ./...
+go vet ./...
+PATH="$(pwd)/.venv/bin:$PATH" python3 -m unittest discover -s python_engine
 ```
-
----
-
-## Roadmap
-
-Based on the development plan in `system_prompt_mcp_onlyoffice_v2.md`:
-
-| Phase | Status | Description |
-|-------|--------|-------------|
-| 1. Audit & Refactor | ✅ Done | Code quality audit, fixed ignored errors |
-| 2. Architecture Design | ✅ Done | Clean architecture boundaries |
-| 3. Bug Fixes | ✅ Done | Fixed ZIP (partial extract + ZipSlip + caps), storage (MaxDocBytes), pinned deps |
-| 4. Document Agent | ✅ Done | `internal/agent/` (incl. `mail_merge`) |
-| 5. Workflow Engine | ✅ Done | `internal/workflow/` (incl. `batch_create`) |
-| 6. Template System | ✅ Done | `internal/templates/` |
-| 7. Document Analyzer | ✅ Done | `internal/analyzer/` |
-| 8. Validator | ✅ Done | `internal/validator/` (ZIP/XML/content_types/rels/metadata, 0–100 score) |
-| 9. Cross-Doc References | ✅ Done | `add_document_reference` |
-| 10. Observability | ✅ Done | `jsonError` envelope, JSONL audit log, `MCP_ONLYOFFICE_LOG_LEVEL` |
-| 11. Testing | ✅ Done | `go test` ooxml/validator/planner/workflow/storage pass |
-| 12. Performance Refactor | ✅ Done | Hardened engine bridge (120s timeout + allowlist, no traceback leak), planner persistent deep-copy cache + retry |
 
 ---
 
 ## Known Issues
 
-- **ONLYOFFICE plugin**: Requires Desktop Editors installed and running
-- **tools.go**: File exceeds 800 lines — candidate for future split into separate files
-
-## Pack Q3 v2 + Validation
-
-End-to-end validation pack (`/tmp/onlyoffice_e2e_v2`, score **100**):
-
-- OOXML native generation opens clean (no repair) in ONLYOFFICE/LibreOffice
-- Validator checks pass (ZIP/XML/content_types/rels/metadata)
-- Python engine caps verified: Excel formulas/conditional/embed, charts DPI 150, 8-slide blue 16:9 decks + notes, PDF cover + pagination + metadata
-- Planner `expandReport` per-step params, persistent deep-copy cache, `ExecutePlan` retry
-- `go test ./internal/ooxml/ ./internal/validator/` (plus planner/workflow/storage) — all pass
-
-```bash
-go test ./internal/ooxml/ ./internal/validator/ ./internal/planner/ ./internal/workflow/ ./internal/storage/
-```
+- **Interactive editor commands.** Desktop Editors under Xvfb paired and opened the authenticated WebSocket. The editor command API was unavailable in that session. `get_selected_text` and `replace_text` still need verification in an interactive Desktop Editors session.
+- **Plugin port discovery.** The bundled plugin scans ports 2021–2070. A custom port or random fallback outside that range requires a matching change to the plugin.
+- **Document validation.** The OOXML validator checks ZIP/XML structure and metadata. Visual rendering can be checked in Desktop Editors.
 
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
-| "binary not found" | Run `make install` or build manually |
-| "ONLYOFFICE Desktop not found" | Set `desktop_path` in config or install ONLYOFFICE |
-| "Python engine not responding" | Ensure `pip install -r python_engine/requirements.txt` ran |
-| "WebSocket connection failed" | Check ONLYOFFICE plugin is enabled and port 2021 is free |
-| "Document storage corrupted" | Delete `documents/.metadata.json` (files remain) |
+| Server binary missing | Run `make build` in the checkout and use its absolute path in the client config. |
+| Desktop Editors binary missing | Install ONLYOFFICE Desktop Editors or set `desktop_path` to the installed binary. |
+| Python engine unavailable | Keep `python_engine/` beside the Go binary and put the virtual environment on the client's `PATH`. |
+| Desktop plugin disconnected | Start the MCP server, restart Desktop Editors, and open a document. Confirm the bridge is listening within ports 2021–2070. |
 
 ---
 

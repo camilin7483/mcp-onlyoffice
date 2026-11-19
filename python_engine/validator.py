@@ -10,6 +10,15 @@ with JSON-serializable values (IPC crosses stdin/stdout as JSON).
 import json
 import os
 
+# IPC guardrails (mirrored by the Go bridge and runner.py).
+MAX_REQUEST_BYTES = 8 * 1024 * 1024    # 8 MiB per request line, enforced at read time
+MAX_STRING_PARAM_LEN = 4 * 1024 * 1024  # 4 MiB per individual string param (utf-8 bytes)
+
+# Param keys that carry filesystem locations. Any key containing one of
+# these markers (case-insensitive) whose value looks like a path is
+# confined to the allowed output dir (see check_path_confinement).
+PATH_KEY_MARKERS = ("path", "output", "dest", "file", "filename", "image")
+
 
 def validate_params(params, capability: str = "") -> dict:
     """Validate IPC params: must be a dict with string keys plus
@@ -30,7 +39,116 @@ def validate_params(params, capability: str = "") -> dict:
         err = _check_param(key, value)
         if err:
             return {"valid": False, "error": f"Param {key!r} for {capability or 'unknown'}: {err}"}
+    # Generic size cap: no individual string param (at any nesting level)
+    # may exceed MAX_STRING_PARAM_LEN utf-8 bytes.
+    err = _check_sizes(params)
+    if err:
+        return {"valid": False, "error": f"Params for {capability or 'unknown'}: {err}"}
     return {"valid": True}
+
+
+def _check_sizes(node) -> str | None:
+    """Return an error string when a nested string exceeds the size cap."""
+    if isinstance(node, str):
+        if len(node.encode("utf-8")) > MAX_STRING_PARAM_LEN:
+            return f"string param exceeds {MAX_STRING_PARAM_LEN} bytes"
+        return None
+    if isinstance(node, dict):
+        for value in node.values():
+            err = _check_sizes(value)
+            if err:
+                return err
+        return None
+    if isinstance(node, (list, tuple)):
+        for value in node:
+            err = _check_sizes(value)
+            if err:
+                return err
+    return None
+
+
+def output_dir_from_env() -> str:
+    """Allowed output dir, confined via MCP_ONLYOFFICE_ENGINE_OUTPUT_DIR.
+
+    Defaults to the current working directory. Always returned resolved.
+    """
+    return os.path.realpath(os.environ.get("MCP_ONLYOFFICE_ENGINE_OUTPUT_DIR", os.getcwd()))
+
+
+def _is_path_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(marker in lowered for marker in PATH_KEY_MARKERS)
+
+
+def _looks_like_path(value: str) -> bool:
+    """Heuristic: only values that could name a file are path-checked.
+
+    Escapes require an absolute path, a separator, or "..", so those are
+    always checked; dotted basenames ("report.xlsx") are checked too while
+    plain ids/tokens ("abc123") are left alone.
+    """
+    if not value or "\x00" in value:
+        return True  # let the confinement check reject it with a clear error
+    if os.path.isabs(value):
+        return True
+    if "/" in value or "\\" in value:
+        return True
+    if value.startswith("~"):
+        return True
+    if value in (".", ".."):
+        return True
+    basename = value.replace("\\", "/").rsplit("/", 1)[-1]
+    return "." in basename
+
+
+def is_within_dir(value: str, allowed: str) -> bool:
+    """True when value resolves inside allowed (or equals it)."""
+    expanded = os.path.expanduser(value)
+    if os.path.isabs(expanded):
+        resolved = os.path.realpath(expanded)
+    else:
+        resolved = os.path.realpath(os.path.join(allowed, expanded))
+    return resolved == allowed or resolved.startswith(allowed + os.sep)
+
+
+def check_path_confinement(params, allowed: str) -> dict:
+    """Reject output path args resolving outside the allowed dir.
+
+    Walks params (including nested dicts/lists); any string value under a
+    path-like key that looks like a path must resolve inside allowed.
+    Absolute paths that escape and any ".." segment are rejected.
+
+    Returns {"valid": bool, "error": str (only when invalid)}.
+    """
+    error = _walk_paths(params, allowed)
+    if error:
+        return {"valid": False, "error": error}
+    return {"valid": True}
+
+
+def _walk_paths(node, allowed: str) -> str | None:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if isinstance(key, str) and isinstance(value, str):
+                if _is_path_key(key) and _looks_like_path(value):
+                    parts = value.replace("\\", "/").split("/")
+                    if ".." in parts:
+                        return f"Path traversal rejected in param {key!r}: {value!r}"
+                    if "\x00" in value:
+                        return f"Invalid path in param {key!r}: NUL byte"
+                    if not is_within_dir(value, allowed):
+                        return (f"Path {value!r} in param {key!r} is outside "
+                                f"the allowed output dir ({allowed})")
+            err = _walk_paths(value, allowed)
+            if err:
+                return err
+        return None
+    if isinstance(node, (list, tuple)):
+        for value in node:
+            err = _walk_paths(value, allowed)
+            if err:
+                return err
+    return None
 
 
 def _check_param(key: str, value) -> str | None:
@@ -59,6 +177,9 @@ def _check_param(key: str, value) -> str | None:
     elif key == "degrees":
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return "must be a number"
+    elif key == "width_inches":
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0.5 or value > 12:
+            return "must be a number between 0.5 and 12"
     elif key in ("data", "values", "categories", "labels", "paths",
                  "x_data", "y_data", "y_series", "x_predict", "rows",
                  "headers", "slides"):

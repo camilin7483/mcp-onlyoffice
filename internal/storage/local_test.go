@@ -3,6 +3,7 @@ package storage
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -199,5 +200,72 @@ func TestMimeType(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("mimeType(%q) = %q, want %q", tt.filename, got, tt.want)
 		}
+	}
+}
+
+func TestResolvePathInsideRoot(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "sub", "file.txt")
+	got, err := ResolvePath(p, []string{root})
+	if err != nil {
+		t.Fatalf("ResolvePath: %v", err)
+	}
+	if got != filepath.Clean(p) {
+		t.Errorf("resolved = %q, want %q", got, filepath.Clean(p))
+	}
+}
+
+func TestResolvePathTraversalDenied(t *testing.T) {
+	root := t.TempDir()
+	for _, p := range []string{
+		filepath.Join(root, "..", "escape.txt"),
+		filepath.Join(root, "..", "..", "etc", "passwd"),
+		"/etc/passwd",
+		filepath.Join(root, "a\x00b"),
+	} {
+		if _, err := ResolvePath(p, []string{root}); err == nil {
+			t.Errorf("ResolvePath(%q): want error, got nil", p)
+		} else if msg := err.Error(); !strings.Contains(msg, "path outside allowed roots") && !strings.Contains(msg, "NUL") {
+			t.Errorf("ResolvePath(%q) message = %q", p, msg)
+		}
+	}
+}
+
+func TestResolvePathSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("s"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(root, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolvePath(filepath.Join(root, "link.txt"), []string{root}); err == nil {
+		t.Error("file symlink escape: want error, got nil")
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "dlink")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolvePath(filepath.Join(root, "dlink", "secret.txt"), []string{root}); err == nil {
+		t.Error("dir symlink escape: want error, got nil")
+	}
+}
+
+func TestResolveDestRefusesLeafSymlink(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real.txt")
+	if err := os.WriteFile(real, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link.txt")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveDest(link, []string{root}); err == nil {
+		t.Error("ResolveDest on symlink: want error, got nil")
+	}
+	if _, err := ResolveDest(filepath.Join(root, "..", "out.txt"), []string{root}); err == nil {
+		t.Error("ResolveDest outside parent: want error, got nil")
 	}
 }

@@ -3,9 +3,11 @@ package server
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/cam/mcp-onlyoffice/internal/agent"
+	"github.com/cam/mcp-onlyoffice/internal/storage"
 	"github.com/cam/mcp-onlyoffice/internal/templates"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -211,10 +213,32 @@ func (h *ToolHandlers) handleCreateReport(ctx context.Context, args map[string]a
 	}
 	sectionsRaw, _ := args["sections"].([]any)
 
-	safeDir := filepath.Join(outputDir, sanitizeFilename(title))
-	docxPath := filepath.Join(safeDir, title+".docx")
-	xlsxPath := filepath.Join(safeDir, title+".xlsx")
-	pptxPath := filepath.Join(safeDir, title+".pptx")
+	resolvedDir, err := storage.ResolveDest(outputDir, h.effectiveRoots())
+	if err != nil {
+		return jsonError(err.Error()), nil
+	}
+	safeTitle := sanitizeFilename(title)
+	if safeTitle == "" {
+		return jsonError("title has no usable filename"), nil
+	}
+	safeDir := filepath.Join(resolvedDir, safeTitle)
+	if err := os.MkdirAll(safeDir, 0o755); err != nil {
+		return jsonError("create report dir: " + err.Error()), nil
+	}
+	overwrite := args["overwrite"] == true
+	var bad *mcp.CallToolResult
+	docxPath, bad := h.prepareWrite(filepath.Join(safeDir, safeTitle+".docx"), overwrite)
+	if bad != nil {
+		return bad, nil
+	}
+	xlsxPath, bad := h.prepareWrite(filepath.Join(safeDir, safeTitle+".xlsx"), overwrite)
+	if bad != nil {
+		return bad, nil
+	}
+	pptxPath, bad := h.prepareWrite(filepath.Join(safeDir, safeTitle+".pptx"), overwrite)
+	if bad != nil {
+		return bad, nil
+	}
 
 	results := make(map[string]any)
 

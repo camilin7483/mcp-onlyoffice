@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	auditlog "github.com/cam/mcp-onlyoffice/internal/audit"
 	"github.com/cam/mcp-onlyoffice/internal/config"
 	"github.com/cam/mcp-onlyoffice/internal/desktoped"
 	"github.com/cam/mcp-onlyoffice/internal/engine"
@@ -76,9 +77,12 @@ func New(ctx context.Context, cfg *config.Config) (*MCPOnlyOffice, error) {
 	}
 
 	pyBridge := engine.NewBridge(pyEnginePath)
+	pyBridge.OutputDir = cfg.StoragePath
 	cache := NewSessionCache()
 	registry := NewToolRegistry()
 	tools := NewToolHandlers(store, desktopPath, bridge, pyBridge, cache, registry)
+	tools.SetAllowedRoots(cfg.EffectiveAllowedRoots()...)
+	tools.SetAuditLogger(auditlog.NewSilent(cfg.StoragePath))
 
 	slog.Info("initializing python engine bridge", "path", pyEnginePath)
 	if err := pyBridge.Start(ctx); err != nil {
@@ -226,7 +230,12 @@ func (s *MCPOnlyOffice) Run() error {
 	}, nil)
 
 	allDefs := s.tools.Definitions()
-	for _, t := range allDefs {
+	activeDefs := allDefs
+	toolset := s.cfg.EffectiveToolset()
+	if toolset == config.ToolsetProfessional {
+		activeDefs = FilterProfessionalTools(allDefs)
+	}
+	for _, t := range activeDefs {
 		tier := 3
 		if isEssential(t.Name) {
 			tier = 1
@@ -238,10 +247,11 @@ func (s *MCPOnlyOffice) Run() error {
 	}
 
 	slog.Info("tools registered",
+		"toolset", toolset,
 		"tier1", len(s.registry.Tier1()),
 		"tier2", len(s.registry.Tier(2))-len(s.registry.Tier1()),
 		"tier3", len(s.registry.Tier(3))-len(s.registry.Tier(2)),
-		"total", len(allDefs),
+		"total", len(activeDefs),
 	)
 
 	done := make(chan struct{}, 1)
@@ -274,11 +284,7 @@ func (s *MCPOnlyOffice) Run() error {
 }
 
 func (s *MCPOnlyOffice) addToolToServer(server *mcp.Server, t toolDef) {
-	server.AddTool(&mcp.Tool{
-		Name:        t.Name,
-		Description: t.Description,
-		InputSchema: t.InputSchema,
-	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	server.AddTool(MCPToolFromDef(t), func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var args map[string]any
 		if len(req.Params.Arguments) > 0 {
 			if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {

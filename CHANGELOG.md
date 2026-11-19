@@ -2,6 +2,63 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- A `professional` profile exposes 16 document-focused MCP tools. The default `legacy` profile retains all 70 registrations. Both profiles include MCP tool annotations.
+
+### Fixed
+
+- The desktop plugin discovers and reconnects to the bridge independently of the editor's initialization hook. Authenticated pairing has been verified under Xvfb. Live selection and replacement still need interactive verification.
+- Report packs sanitize output filenames, require explicit permission to overwrite existing files, and validate DOCX image widths.
+- Fresh checkouts include the Go command entry point. The ignore rule now matches only the compiled binaries at the repository root.
+
+### Documentation
+
+- Updated the source build and OpenCode setup, documented report images, and added a chart generated and embedded in a sample DOCX by the Python engine.
+
+## [0.4.2] — 2026-11-17
+
+### Reports
+- `documents.create_report` accepts `type: "image"` sections with `path`/`image`
+  and optional `width_inches`; the image is embedded and the path is checked by
+  the Python output-dir confinement. Added Python regression tests.
+
+## [0.4.1] — 2026-11-17
+
+### ONLYOFFICE plugin live pairing
+- Fixed plugin manifest GUID/folder layout: Desktop Editors loads
+  `sdkjs-plugins/<guid-without-asc.>/index.html`. The plugin now installs as
+  `asc.{UUID}` config inside `{UUID}` folder.
+- `/ping` and `/pair` send CORS headers; WebSocket accepts the privileged
+  `onlyoffice://plugin` (and its bare `plugin` Origin) after token/origin checks.
+- Plugin captures the `Asc.plugin` API at init so document commands keep working
+  if the host removes the global afterwards.
+- Verified live: Desktop Editors 8.x under Xvfb loads the plugin, pairs and opens
+  the authenticated WebSocket on port 2021.
+
+## [0.4.0] — 2026-11-17
+
+### Security / Hardening
+- Plugin bridge: per-launch token (`~/.config/mcp-onlyoffice/bridge-token`, 0600), origin
+  allowlist (no website origins), `/pair` bootstrap and `/ping` discovery, single active
+  client, 1 MiB read limit, request cap, honest send failures, random-port fallback logged.
+- `replace_text`: real `SearchAndReplace` with match count; no full-document paste; Go handler
+  propagates `{ok,matches}`.
+- Filesystem: all fs/document writers resolve through allowed roots with symlink checks;
+  overwrite requires `overwrite=true` and creates `.bak-YYYYMMDDHHMMSS`; recursive delete
+  requires `recursive=true`; zip-slip/absolute/symlink entries rejected; 32 MiB read /
+  64 MiB write / 1000-entry / 256 MiB caps; JSONL audit.
+- Python engine: SIGKILL + lazy restart on timeout/cancel, echoed request ids, no automatic
+  retry of unknown outcomes, output-dir confinement, 8 MiB request cap.
+- Config: allowed roots derive from the final storage path (env/config no longer leave stale
+  default roots enabled).
+
+### Tests
+- New bridge, filesystem, engine-bridge, plugin and python confinement suites; `go test ./...`
+  and `python3 -m unittest test_confinement` green.
+
 ## [0.3.0] — UNRELEASED
 
 ### Security / Hardening
@@ -36,4 +93,4 @@ All notable changes to this project will be documented in this file.
 
 ### Validation
 - `go test ./internal/ooxml/ ./internal/validator/ ./internal/planner/ ./internal/workflow/ ./internal/storage/` — all pass.
-- E2E pack v2 (`/tmp/onlyoffice_e2e_v2`) — score 100.
+- The Q3 sample pack passed the structural validator with a score of 100.

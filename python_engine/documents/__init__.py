@@ -184,6 +184,19 @@ class DocumentEngine:
             elif stype == "table":
                 self._add_styled_table(doc, section_item.get("headers", []),
                                        section_item.get("rows", []))
+            elif stype == "image":
+                img_path = section_item.get("path") or section_item.get("image") or ""
+                if img_path:
+                    if not os.path.isfile(img_path):
+                        raise FileNotFoundError("image not found: " + str(img_path))
+                    try:
+                        width = float(section_item.get("width_inches", 6.0))
+                    except (TypeError, ValueError):
+                        raise ValueError("width_inches must be a number between 0.5 and 12")
+                    if width < 0.5 or width > 12:
+                        raise ValueError("width_inches must be between 0.5 and 12")
+                    picture = doc.add_picture(img_path, width=Inches(width))
+                    picture.alignment = WD_ALIGN_PARAGRAPH.CENTER
             quote = section_item.get("quote", "")
             if quote:
                 qp = doc.add_paragraph()

@@ -122,14 +122,14 @@ func (h *ToolHandlers) handleExportDocument(ctx context.Context, args map[string
 	if err != nil {
 		return textError("read data: " + err.Error()), nil
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return textError("create directory: " + err.Error()), nil
+	resolved, bad := h.prepareWrite(path, args["overwrite"] == true)
+	if bad != nil {
+		return bad, nil
 	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(resolved, data, 0o644); err != nil {
 		return textError("write file: " + err.Error()), nil
 	}
-	return jsonResult(map[string]any{"path": path, "size": len(data), "filename": doc.Filename}), nil
+	return jsonResult(map[string]any{"path": resolved, "size": len(data), "filename": doc.Filename}), nil
 }
 
 func (h *ToolHandlers) handleImportDocument(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
@@ -137,11 +137,15 @@ func (h *ToolHandlers) handleImportDocument(ctx context.Context, args map[string
 	if path == "" {
 		return textError("path is required"), nil
 	}
-	data, err := os.ReadFile(path)
+	resolved, err := storage.ResolvePath(path, h.effectiveRoots())
+	if err != nil {
+		return textError(err.Error()), nil
+	}
+	data, err := os.ReadFile(resolved)
 	if err != nil {
 		return textError("read file: " + err.Error()), nil
 	}
-	filename := filepath.Base(path)
+	filename := filepath.Base(resolved)
 	doc, err := h.store.Create(filename, data)
 	if err != nil {
 		return textError("import failed: " + err.Error()), nil

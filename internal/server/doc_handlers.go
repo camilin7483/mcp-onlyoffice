@@ -7,8 +7,36 @@ import (
 	"strings"
 
 	"github.com/cam/mcp-onlyoffice/internal/ooxml"
+	"github.com/cam/mcp-onlyoffice/internal/plugin"
+	"github.com/cam/mcp-onlyoffice/internal/storage"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// prepareWrite resolves a document output path against the allowed roots and
+// applies the same overwrite/backup policy as the generic filesystem tools.
+func (h *ToolHandlers) prepareWrite(path string, overwrite bool) (string, *mcp.CallToolResult) {
+	resolved, err := storage.ResolveDest(path, h.effectiveRoots())
+	if err != nil {
+		return "", textError(err.Error())
+	}
+	if fi, statErr := os.Lstat(resolved); statErr == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return "", textError("refusing to write through symlink: " + path)
+		}
+		if !overwrite {
+			return "", textError("file exists: " + path + " (pass overwrite=true)")
+		}
+		if fi.Mode().IsRegular() {
+			if old, readErr := os.ReadFile(resolved); readErr == nil {
+				_ = os.WriteFile(resolved+".bak-"+storage.BackupTimestamp(), old, 0o600)
+			}
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(resolved), 0o755); err != nil {
+		return "", textError("create directory: " + err.Error())
+	}
+	return resolved, nil
+}
 
 func (h *ToolHandlers) handleCreate(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
 	filename, _ := args["filename"].(string)
@@ -57,16 +85,15 @@ func (h *ToolHandlers) handleWriteDocument(ctx context.Context, args map[string]
 		return textError("create document: " + err.Error()), nil
 	}
 
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return textError("create directory: " + err.Error()), nil
+	resolved, bad := h.prepareWrite(path, args["overwrite"] == true)
+	if bad != nil {
+		return bad, nil
 	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(resolved, data, 0o644); err != nil {
 		return textError("write file: " + err.Error()), nil
 	}
 
-	return jsonResult(map[string]any{"path": path, "size": len(data), "format": ext}), nil
+	return jsonResult(map[string]any{"path": resolved, "size": len(data), "format": ext}), nil
 }
 
 func (h *ToolHandlers) handleCreateWord(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
@@ -137,14 +164,14 @@ func (h *ToolHandlers) handleWriteDocxFromText(ctx context.Context, args map[str
 	if err != nil {
 		return textError("create docx: " + err.Error()), nil
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return textError("create directory: " + err.Error()), nil
+	resolved, bad := h.prepareWrite(path, args["overwrite"] == true)
+	if bad != nil {
+		return bad, nil
 	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(resolved, data, 0o644); err != nil {
 		return textError("write file: " + err.Error()), nil
 	}
-	return jsonResult(map[string]any{"path": path, "size": len(data)}), nil
+	return jsonResult(map[string]any{"path": resolved, "size": len(data)}), nil
 }
 
 func (h *ToolHandlers) handleWriteTableDocx(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
@@ -163,14 +190,14 @@ func (h *ToolHandlers) handleWriteTableDocx(ctx context.Context, args map[string
 	if err != nil {
 		return textError("create docx: " + err.Error()), nil
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return textError("create directory: " + err.Error()), nil
+	resolved, bad := h.prepareWrite(path, args["overwrite"] == true)
+	if bad != nil {
+		return bad, nil
 	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(resolved, data, 0o644); err != nil {
 		return textError("write file: " + err.Error()), nil
 	}
-	return jsonResult(map[string]any{"path": path, "size": len(data)}), nil
+	return jsonResult(map[string]any{"path": resolved, "size": len(data)}), nil
 }
 
 func (h *ToolHandlers) handleWriteSpreadsheet(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
@@ -188,14 +215,14 @@ func (h *ToolHandlers) handleWriteSpreadsheet(ctx context.Context, args map[stri
 	if err != nil {
 		return textError("create spreadsheet: " + err.Error()), nil
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return textError("create directory: " + err.Error()), nil
+	resolved, bad := h.prepareWrite(path, args["overwrite"] == true)
+	if bad != nil {
+		return bad, nil
 	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(resolved, data, 0o644); err != nil {
 		return textError("write file: " + err.Error()), nil
 	}
-	return jsonResult(map[string]any{"path": path, "size": len(data)}), nil
+	return jsonResult(map[string]any{"path": resolved, "size": len(data)}), nil
 }
 
 func (h *ToolHandlers) handleWritePresentation(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
@@ -232,10 +259,11 @@ func (h *ToolHandlers) handleWritePresentation(ctx context.Context, args map[str
 		return textError("no valid slides provided"), nil
 	}
 
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return textError("create directory: " + err.Error()), nil
+	resolved, bad := h.prepareWrite(path, args["overwrite"] == true)
+	if bad != nil {
+		return bad, nil
 	}
+	path = resolved
 
 	if h.pyBridge != nil {
 		resp, err := h.pyBridge.Execute(ctx, "presentations.create_from_slides", map[string]any{
@@ -262,8 +290,28 @@ func (h *ToolHandlers) handleWritePresentation(ctx context.Context, args map[str
 	if err != nil {
 		return textError("create presentation: " + err.Error()), nil
 	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(resolved, data, 0o644); err != nil {
 		return textError("write file: " + err.Error()), nil
 	}
-	return jsonResult(map[string]any{"path": path, "size": len(data)}), nil
+	return jsonResult(map[string]any{"path": resolved, "size": len(data)}), nil
+}
+
+// replaceTextResult maps a replace_text bridge outcome to its MCP result:
+// {"ok":true,"matches":N} on success, an explicit error otherwise. It never
+// reports success without a real match count.
+//
+// NOTE: handleReplaceText (plugin_handlers.go, outside this change's file
+// scope) must call it instead of discarding the SendCommand result:
+//
+//	result, err := h.bridge.SendCommand(ctx, "replace_text", map[string]any{"old": oldT, "new": newT}, 10*time.Second)
+//	return replaceTextResult(result, err), nil
+func replaceTextResult(result any, err error) *mcp.CallToolResult {
+	if err != nil {
+		return textError("plugin error: " + err.Error())
+	}
+	matches, mErr := plugin.ReplaceMatches(result)
+	if mErr != nil {
+		return textError("plugin error: " + mErr.Error())
+	}
+	return jsonResult(map[string]any{"ok": true, "matches": matches})
 }

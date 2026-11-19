@@ -2,9 +2,12 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/cam/mcp-onlyoffice/internal/plugin"
 )
 
 func (h *ToolHandlers) waitForPlugin() (bool, string) {
@@ -82,11 +85,15 @@ func (h *ToolHandlers) handleReplaceText(ctx context.Context, args map[string]an
 	if !ok {
 		return textError(msg), nil
 	}
-	_, err := h.bridge.SendCommand(ctx, "replace_text", map[string]any{"old": oldT, "new": newT}, 10*time.Second)
+	res, err := h.bridge.SendCommand(ctx, "replace_text", map[string]any{"old": oldT, "new": newT}, 10*time.Second)
 	if err != nil {
 		return textError("plugin error: " + err.Error()), nil
 	}
-	return okResult(), nil
+	matches, err := plugin.ReplaceMatches(res)
+	if err != nil {
+		return textError("replace_text did not report a match count: " + err.Error()), nil
+	}
+	return textResult(fmt.Sprintf(`{"ok":true,"matches":%d}`, matches)), nil
 }
 
 func (h *ToolHandlers) handleCreateTable(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
