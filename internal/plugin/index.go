@@ -154,7 +154,11 @@ async function findServerPort() {
 }
 
 async function pair(port) {
-  const res = await fetch("http://127.0.0.1:" + port + "/pair");
+  const chRes = await fetch("http://127.0.0.1:" + port + "/pair/challenge");
+  if (!chRes.ok) throw new Error("challenge rejected: HTTP " + chRes.status);
+  const ch = await chRes.json();
+  if (!ch || !ch.nonce) throw new Error("challenge returned no nonce");
+  const res = await fetch("http://127.0.0.1:" + port + "/pair?nonce=" + encodeURIComponent(ch.nonce));
   if (!res.ok) throw new Error("pair rejected: HTTP " + res.status);
   return res.json();
 }

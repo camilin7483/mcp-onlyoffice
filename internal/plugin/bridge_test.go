@@ -151,8 +151,28 @@ func mustJSON(v any) []byte {
 func TestPairOriginRules(t *testing.T) {
 	b, _ := testBridge(t)
 	srv := serveBridge(t, b)
-	get := func(origin string) int {
-		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/pair", nil)
+	getChallenge := func(origin string) (string, int) {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/pair/challenge", nil)
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET /pair/challenge: %v", err)
+		}
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			return "", res.StatusCode
+		}
+		var body map[string]any
+		if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		n, _ := body["nonce"].(string)
+		return n, res.StatusCode
+	}
+	getPair := func(origin, nonce string) (int, map[string]any) {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/pair?nonce="+url.QueryEscape(nonce), nil)
 		if origin != "" {
 			req.Header.Set("Origin", origin)
 		}
@@ -169,17 +189,33 @@ func TestPairOriginRules(t *testing.T) {
 			if body["token"] != b.Token() || body["app"] != AppName {
 				t.Fatalf("unexpected body: %v", body)
 			}
+			if body["nonce"] != nonce {
+				t.Fatalf("pair must echo consumed nonce, got %v", body)
+			}
+			return res.StatusCode, body
 		}
-		return res.StatusCode
+		return res.StatusCode, nil
 	}
 	for _, o := range []string{"", "null", "file://", "file:///index.html", "onlyoffice://plugin"} {
-		if code := get(o); code != http.StatusOK {
-			t.Errorf("origin %q: status = %d, want 200", o, code)
+		nonce, code := getChallenge(o)
+		if code != http.StatusOK || nonce == "" {
+			t.Errorf("challenge origin %q: status = %d, want 200 with nonce", o, code)
+			continue
+		}
+		if code := func() int { c, _ := getPair(o, nonce); return c }(); code != http.StatusOK {
+			t.Errorf("pair origin %q: status = %d, want 200", o, code)
 		}
 	}
 	for _, o := range []string{"https://evil.com", "http://evil.com", "http://127.0.0.1:2021", "https://localhost"} {
-		if code := get(o); code != http.StatusForbidden {
-			t.Errorf("origin %q: status = %d, want 403", o, code)
+		if _, code := getChallenge(o); code != http.StatusForbidden {
+			t.Errorf("challenge origin %q: status = %d, want 403", o, code)
+		}
+		nonce, code := getChallenge("")
+		if code != http.StatusOK {
+			t.Fatalf("setup challenge: status = %d", code)
+		}
+		if c, _ := getPair(o, nonce); c != http.StatusForbidden {
+			t.Errorf("pair origin %q: status = %d, want 403", o, c)
 		}
 	}
 }

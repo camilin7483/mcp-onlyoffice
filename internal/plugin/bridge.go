@@ -116,13 +116,36 @@ type Bridge struct {
 	srv       *http.Server
 	token     string
 	tokenPath string
+	// Pairing challenges: single-use nonces bound to the requesting IP.
+	// nonceMu guards nonces and nonceOrder; never held while blocking.
+	nonceMu    sync.Mutex
+	nonces     map[string]nonceEntry
+	nonceOrder []string
+	nonceNow   func() time.Time
+	nonceTTL   time.Duration
 }
+
+// nonceEntry is one outstanding pairing challenge.
+type nonceEntry struct {
+	ip      string
+	expires time.Time
+}
+
+const (
+	// challengeTTLSeconds is how long a /pair/challenge nonce stays valid.
+	challengeTTLSeconds = 60
+	// maxNonces caps outstanding challenges; the oldest is evicted when full.
+	maxNonces = 32
+)
 
 func NewBridge(port int) *Bridge {
 	b := &Bridge{
-		reg:   NewRegistry(),
-		port:  port,
-		token: newToken(),
+		reg:      NewRegistry(),
+		port:     port,
+		token:    newToken(),
+		nonces:   make(map[string]nonceEntry),
+		nonceNow: time.Now,
+		nonceTTL: challengeTTLSeconds * time.Second,
 	}
 	b.tokenPath = defaultTokenPath()
 	if b.tokenPath == "" {
@@ -243,6 +266,7 @@ func (b *Bridge) Stop() {
 func (b *Bridge) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ping", b.handlePing)
+	mux.HandleFunc("/pair/challenge", b.handlePairChallenge)
 	mux.HandleFunc("/pair", b.handlePair)
 	mux.HandleFunc("/plugin", b.handleWebSocket)
 	return mux
@@ -263,9 +287,118 @@ func (b *Bridge) handlePing(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"app": AppName, "port": b.ListenPort(), "version": BridgeVersion, "protocol": version.BridgeProtocol})
 }
 
+// handlePairChallenge issues a single-use nonce bound to the caller's IP.
+// Same loopback and origin rules as /pair; the plugin webview needs the
+// wildcard CORS header to read the response from a file:// page.
+func (b *Bridge) handlePairChallenge(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,OPTIONS")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !isLoopbackHost(r.Host) {
+		http.Error(w, "pairing allowed from loopback only", http.StatusForbidden)
+		return
+	}
+	if !allowedPairOrigin(r.Header.Get("Origin")) {
+		http.Error(w, "pairing refused for browser page origin", http.StatusForbidden)
+		return
+	}
+	nonce, expiresIn := b.issueChallenge(remoteIP(r))
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	writeJSON(w, map[string]any{"nonce": nonce, "expires_in": expiresIn})
+}
+
+// issueChallenge creates a nonce bound to ip, evicting the oldest when full.
+func (b *Bridge) issueChallenge(ip string) (string, int) {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		panic(fmt.Sprintf("pair nonce: %v", err))
+	}
+	nonce := hex.EncodeToString(buf[:])
+	ttl := b.nonceTTL
+	if ttl <= 0 {
+		ttl = challengeTTLSeconds * time.Second
+	}
+	now := b.nonceNow
+	if now == nil {
+		now = time.Now
+	}
+	b.nonceMu.Lock()
+	defer b.nonceMu.Unlock()
+	// Reclaim expired entries first so a burst of stale nonces cannot
+	// evict a live one.
+	nowT := now()
+	kept := b.nonceOrder[:0]
+	for _, n := range b.nonceOrder {
+		if e, ok := b.nonces[n]; ok && nowT.Before(e.expires) {
+			kept = append(kept, n)
+		} else {
+			delete(b.nonces, n)
+		}
+	}
+	b.nonceOrder = kept
+	if len(b.nonceOrder) >= maxNonces {
+		oldest := b.nonceOrder[0]
+		delete(b.nonces, oldest)
+		b.nonceOrder = b.nonceOrder[1:]
+	}
+	b.nonces[nonce] = nonceEntry{ip: ip, expires: nowT.Add(ttl)}
+	b.nonceOrder = append(b.nonceOrder, nonce)
+	return nonce, int(ttl / time.Second)
+}
+
+// consumeNonce atomically validates and removes a nonce. Any failure
+// returns false; only a valid nonce is consumed.
+func (b *Bridge) consumeNonce(nonce, ip string) bool {
+	now := b.nonceNow
+	if now == nil {
+		now = time.Now
+	}
+	b.nonceMu.Lock()
+	defer b.nonceMu.Unlock()
+	e, ok := b.nonces[nonce]
+	if !ok {
+		return false
+	}
+	remove := func() {
+		delete(b.nonces, nonce)
+		for i, n := range b.nonceOrder {
+			if n == nonce {
+				b.nonceOrder = append(b.nonceOrder[:i], b.nonceOrder[i+1:]...)
+				break
+			}
+		}
+	}
+	if !now().Before(e.expires) {
+		remove()
+		return false
+	}
+	if e.ip != ip {
+		return false
+	}
+	remove()
+	return true
+}
+
+// remoteIP returns the host part of r.RemoteAddr for nonce binding.
+func remoteIP(r *http.Request) string {
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return strings.Trim(host, "[]")
+}
+
 // handlePair hands the per-launch token to a local pairing client. Only
 // reachable from loopback with no browser-page Origin (websites always send
-// their own Origin and get 403).
+// their own Origin and get 403). Requires a single-use ?nonce= from
+// /pair/challenge, consumed before the token is written so a replay loses.
 func (b *Bridge) handlePair(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -285,10 +418,15 @@ func (b *Bridge) handlePair(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "pairing refused for browser page origin", http.StatusForbidden)
 		return
 	}
+	nonce := r.URL.Query().Get("nonce")
+	if nonce == "" || !b.consumeNonce(nonce, remoteIP(r)) {
+		http.Error(w, "pairing requires a valid nonce", http.StatusForbidden)
+		return
+	}
 	// The plugin runs inside a file:// / null-origin iframe; without this the
 	// browser blocks reading the token even though pairing is allowed.
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	writeJSON(w, map[string]any{"token": b.token, "port": b.ListenPort(), "app": AppName})
+	writeJSON(w, map[string]any{"token": b.token, "port": b.ListenPort(), "app": AppName, "nonce": nonce})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
