@@ -324,6 +324,127 @@ func TestFSZipSymlinkedDestBlocked(t *testing.T) {
 	}
 }
 
+func TestFSDeleteRootRefused(t *testing.T) {
+	h, root := testFS(t)
+	sub := filepath.Join(root, "sub")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Nested roots: the parent resolves, so only the root guard can stop this.
+	h.SetAllowedRoots(root, sub)
+	r, _ := h.handleDeleteFile(context.Background(), map[string]any{"path": sub, "recursive": true})
+	if !r.IsError || !strings.Contains(resultText(t, r), "allowed root") {
+		t.Fatalf("root delete not refused: %s", resultText(t, r))
+	}
+	if _, err := os.Stat(sub); err != nil {
+		t.Errorf("allowed root removed: %v", err)
+	}
+}
+
+func TestFSMoveRootRefused(t *testing.T) {
+	h, root := testFS(t)
+	sub := filepath.Join(root, "sub")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(root, "f.txt")
+	callOK(t, h.handleWriteText, map[string]any{"path": f, "content": "x"})
+	h.SetAllowedRoots(root, sub)
+
+	// Source is a root: refused, still present.
+	r, _ := h.handleMoveFile(context.Background(), map[string]any{"source": sub, "dest": filepath.Join(root, "moved")})
+	if !r.IsError || !strings.Contains(resultText(t, r), "allowed root") {
+		t.Fatalf("root move-source not refused: %s", resultText(t, r))
+	}
+	if _, err := os.Stat(sub); err != nil {
+		t.Errorf("allowed root moved away: %v", err)
+	}
+
+	// Destination is a root: refused, both sides untouched.
+	r, _ = h.handleMoveFile(context.Background(), map[string]any{"source": f, "dest": sub})
+	if !r.IsError || !strings.Contains(resultText(t, r), "allowed root") {
+		t.Fatalf("root move-dest not refused: %s", resultText(t, r))
+	}
+	if _, err := os.Stat(f); err != nil {
+		t.Errorf("move source removed: %v", err)
+	}
+	if fi, err := os.Stat(sub); err != nil || !fi.IsDir() {
+		t.Errorf("allowed root clobbered: %v %v", fi, err)
+	}
+}
+
+func TestWriteBackupRefusesExistingAndSymlink(t *testing.T) {
+	_, root := testFS(t)
+	src := filepath.Join(root, "src.txt")
+	if err := os.WriteFile(src, []byte("orig"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	dst := src + ".bak-test"
+	if err := writeBackup(src, dst); err != nil {
+		t.Fatalf("writeBackup: %v", err)
+	}
+	if bak, _ := os.ReadFile(dst); string(bak) != "orig" {
+		t.Errorf("backup content = %q, want orig", bak)
+	}
+	if fi, _ := os.Stat(dst); fi.Mode().Perm() != 0600 {
+		t.Errorf("backup mode = %o, want 600", fi.Mode().Perm())
+	}
+	// Existing destination (regular file) is refused, source untouched.
+	if err := writeBackup(src, dst); err == nil || !strings.Contains(err.Error(), "backup exists") {
+		t.Errorf("existing backup not refused: %v", err)
+	}
+
+	// Symlink at the destination is refused and never followed: nothing
+	// lands outside the root.
+	outside := t.TempDir()
+	planted := filepath.Join(outside, "evil.txt")
+	link := filepath.Join(root, "link.bak")
+	if err := os.Symlink(planted, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeBackup(src, link); err == nil {
+		t.Errorf("symlink backup not refused")
+	}
+	if _, err := os.Stat(planted); !os.IsNotExist(err) {
+		t.Errorf("backup escaped through symlink: %v", err)
+	}
+}
+
+func TestFSAppendTextLimitsAndAudit(t *testing.T) {
+	h, root := testFS(t)
+	auditDir := t.TempDir()
+	al, err := auditlog.New(auditDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer al.Close()
+	h.SetAuditLogger(al)
+
+	p := filepath.Join(root, "log.txt")
+	callOK(t, h.handleWriteText, map[string]any{"path": p, "content": "abcd"})
+
+	// Total resulting size over the cap is refused; file unchanged.
+	fsMaxWrite = 4
+	r, _ := h.handleAppendText(context.Background(), map[string]any{"path": p, "content": "e", "overwrite": true})
+	if !r.IsError || !strings.Contains(resultText(t, r), "over the 4 byte limit") {
+		t.Fatalf("append over cap not refused: %s", resultText(t, r))
+	}
+	if data, _ := os.ReadFile(p); string(data) != "abcd" {
+		t.Errorf("content changed on refused append: %q", data)
+	}
+	fsMaxWrite = storage.MaxWriteBytes
+
+	// Normal append works and audits.
+	callOK(t, h.handleAppendText, map[string]any{"path": p, "content": "e", "overwrite": true})
+	if data, _ := os.ReadFile(p); string(data) != "abcde" {
+		t.Errorf("append content = %q, want abcde", data)
+	}
+	auditData, _ := os.ReadFile(al.Path())
+	if !strings.Contains(string(auditData), "append_text") {
+		t.Errorf("audit missing append_text entry: %s", auditData)
+	}
+}
+
 func TestFSWalkAndWriteLimits(t *testing.T) {
 	h, root := testFS(t)
 	for i := 0; i < 5; i++ {

@@ -178,6 +178,39 @@ func recursiveOK(args map[string]any) bool {
 	return false
 }
 
+// writeBackup streams src into dst, refusing when dst already exists
+// (including a symlink planted at that name). The file is created with
+// O_EXCL so the existence check has no follow-or-clobber race, memory stays
+// bounded via io.Copy, and a symlink at dst is never followed.
+func writeBackup(src, dst string) error {
+	if _, err := os.Lstat(dst); err == nil {
+		return fmt.Errorf("backup exists: %s", dst)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
+}
+
+// refuseRoot rejects an already-resolved path that is exactly one of the
+// configured allowed roots, so delete/move can never remove a root itself.
+func (h *ToolHandlers) refuseRoot(resolved, verb string) *mcp.CallToolResult {
+	if storage.IsAllowedRoot(resolved, h.effectiveRoots()) {
+		return textError(fmt.Sprintf("refusing to %s an allowed root: %s", verb, resolved))
+	}
+	return nil
+}
+
 // ensureWritable refuses to clobber an existing file unless overwrite=true;
 // on overwrite it backs the previous file up to <name>.bak-YYYYMMDDHHMMSS
 // and audits. Returns the backup path ("" when nothing was backed up).
@@ -198,12 +231,8 @@ func ensureWritable(resolved, action string, args map[string]any) (string, *mcp.
 	if !overwriteOK(args) {
 		return "", textError(fmt.Sprintf("file exists: %s (pass overwrite=true)", resolved))
 	}
-	data, err := os.ReadFile(resolved)
-	if err != nil {
-		return "", textError("backup read: " + err.Error())
-	}
 	bak := resolved + ".bak-" + storage.BackupTimestamp()
-	if err := os.WriteFile(bak, data, 0600); err != nil {
+	if err := writeBackup(resolved, bak); err != nil {
 		return "", textError("backup write: " + err.Error())
 	}
 	auditLog(action, resolved, "ok", map[string]any{"backup": bak})
@@ -317,16 +346,24 @@ func (h *ToolHandlers) handleAppendText(ctx context.Context, args map[string]any
 	if errRes != nil {
 		return errRes, nil
 	}
+	var existing int64
 	if fi, err := os.Lstat(resolved); err == nil {
 		// Existing file: an explicit overwrite flag is required; no backup.
 		if fi.IsDir() {
 			return textError(fmt.Sprintf("path %q is a directory, not a file", path)), nil
 		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return textError(fmt.Sprintf("refusing to follow symlink: %s", resolved)), nil
+		}
 		if !overwriteOK(args) {
 			return textError(fmt.Sprintf("file exists: %s (pass overwrite=true)", resolved)), nil
 		}
+		existing = fi.Size()
 	} else if !os.IsNotExist(err) {
 		return textError("stat file: " + err.Error()), nil
+	}
+	if errRes := checkWriteSize(int(existing) + len(content)); errRes != nil {
+		return errRes, nil
 	}
 	if errRes := mkdirParent(resolved); errRes != nil {
 		return errRes, nil
@@ -340,6 +377,7 @@ func (h *ToolHandlers) handleAppendText(ctx context.Context, args map[string]any
 	if err != nil {
 		return textError("append: " + err.Error()), nil
 	}
+	auditLog("append_text", resolved, "ok", map[string]any{"appended": n})
 	return jsonResult(map[string]any{"path": path, "appended": n}), nil
 }
 
@@ -492,11 +530,17 @@ func (h *ToolHandlers) handleMoveFile(ctx context.Context, args map[string]any) 
 	if errRes != nil {
 		return errRes, nil
 	}
+	if errRes := h.refuseRoot(resolvedSrc, "move"); errRes != nil {
+		return errRes, nil
+	}
 	if _, err := os.Lstat(resolvedSrc); err != nil {
 		return textError("stat source: " + err.Error()), nil
 	}
 	resolvedDst, errRes := h.resolveDest(dst)
 	if errRes != nil {
+		return errRes, nil
+	}
+	if errRes := h.refuseRoot(resolvedDst, "move"); errRes != nil {
 		return errRes, nil
 	}
 	bak, errRes := ensureWritable(resolvedDst, "move_file", args)
@@ -519,6 +563,9 @@ func (h *ToolHandlers) handleDeleteFile(ctx context.Context, args map[string]any
 	}
 	resolved, errRes := h.resolveDest(path)
 	if errRes != nil {
+		return errRes, nil
+	}
+	if errRes := h.refuseRoot(resolved, "delete"); errRes != nil {
 		return errRes, nil
 	}
 	fi, err := os.Lstat(resolved)

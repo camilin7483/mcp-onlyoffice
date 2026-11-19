@@ -110,20 +110,50 @@ func ResolveDest(p string, roots []string) (string, error) {
 	return full, nil
 }
 
+// canonicalRoot absolutizes and cleans r, resolving a symlinked root itself.
+// It reports false for NUL-containing or unresolvable roots.
+func canonicalRoot(r string) (string, bool) {
+	if strings.ContainsRune(r, 0) {
+		return "", false
+	}
+	abs, err := filepath.Abs(filepath.Clean(r))
+	if err != nil {
+		return "", false
+	}
+	// Resolve the root itself so a symlinked root still matches.
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = real
+	}
+	return abs, true
+}
+
 func insideAnyRoot(resolved string, roots []string) bool {
 	for _, r := range roots {
-		if strings.ContainsRune(r, 0) {
+		abs, ok := canonicalRoot(r)
+		if !ok {
 			continue
-		}
-		abs, err := filepath.Abs(filepath.Clean(r))
-		if err != nil {
-			continue
-		}
-		// Resolve the root itself so a symlinked root still matches.
-		if real, err := filepath.EvalSymlinks(abs); err == nil {
-			abs = real
 		}
 		if resolved == abs || strings.HasPrefix(resolved, abs+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsAllowedRoot reports whether the already-resolved absolute path is exactly
+// one of the configured allowed roots, comparing both sides after Clean and
+// a best-effort EvalSymlinks (roots reuse the insideAnyRoot resolution).
+func IsAllowedRoot(resolved string, roots []string) bool {
+	cleaned := filepath.Clean(resolved)
+	if real, err := filepath.EvalSymlinks(cleaned); err == nil {
+		cleaned = real
+	}
+	for _, r := range roots {
+		abs, ok := canonicalRoot(r)
+		if !ok {
+			continue
+		}
+		if cleaned == abs {
 			return true
 		}
 	}
