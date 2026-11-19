@@ -261,13 +261,22 @@ type errTestHelper string
 func (e errTestHelper) Error() string { return string(e) }
 
 func TestStartFailureUnavailable(t *testing.T) {
-	b := NewBridge(filepath.Join(t.TempDir(), "missing-dir"))
+	missingDir := filepath.Join(t.TempDir(), "missing-dir")
+	b := NewBridge(missingDir)
 	defer b.Stop()
 	if b.Available() {
 		t.Fatal("fresh bridge must not report Available()")
 	}
-	if err := b.Start(context.Background()); err == nil {
+	startErr := b.Start(context.Background())
+	if startErr == nil {
 		t.Fatal("expected Start to fail against a nonexistent runner")
+	}
+	if !strings.Contains(startErr.Error(), "python engine unavailable") ||
+		!strings.Contains(startErr.Error(), "runner_missing") {
+		t.Fatalf("expected stable reason-coded error, got: %v", startErr)
+	}
+	if strings.Contains(startErr.Error(), missingDir) {
+		t.Fatalf("start error must not leak paths, got: %v", startErr)
 	}
 	if b.Available() {
 		t.Fatal("failed bridge must report Available() == false")
@@ -279,8 +288,8 @@ func TestStartFailureUnavailable(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "python engine unavailable") {
 		t.Fatalf("expected unavailable error, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "runner") {
-		t.Fatalf("unavailable error must carry the cause, got: %v", err)
+	if strings.Contains(err.Error(), missingDir) {
+		t.Fatalf("execute error must not leak paths, got: %v", err)
 	}
 	if err := b.Stop(); err != nil {
 		t.Fatalf("Stop must stay safe after failed start: %v", err)

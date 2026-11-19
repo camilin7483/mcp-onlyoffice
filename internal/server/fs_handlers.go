@@ -197,9 +197,20 @@ func writeBackup(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	return err
+	_, copyErr := io.Copy(out, in)
+	syncErr := out.Sync()
+	closeErr := out.Close()
+	if copyErr != nil || syncErr != nil || closeErr != nil {
+		_ = os.Remove(dst)
+		if copyErr != nil {
+			return copyErr
+		}
+		if syncErr != nil {
+			return syncErr
+		}
+		return closeErr
+	}
+	return nil
 }
 
 // refuseRoot rejects an already-resolved path that is exactly one of the
@@ -227,6 +238,9 @@ func ensureWritable(resolved, action string, args map[string]any) (string, *mcp.
 	}
 	if fi.IsDir() {
 		return "", textError(fmt.Sprintf("destination exists: %s (refusing to overwrite a directory)", resolved))
+	}
+	if !fi.Mode().IsRegular() {
+		return "", textError(fmt.Sprintf("refusing to back up non-regular file: %s", resolved))
 	}
 	if !overwriteOK(args) {
 		return "", textError(fmt.Sprintf("file exists: %s (pass overwrite=true)", resolved))

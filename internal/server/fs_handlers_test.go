@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"context"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -407,6 +408,53 @@ func TestWriteBackupRefusesExistingAndSymlink(t *testing.T) {
 	}
 	if _, err := os.Stat(planted); !os.IsNotExist(err) {
 		t.Errorf("backup escaped through symlink: %v", err)
+	}
+}
+
+func TestEnsureWritableRefusesNonRegular(t *testing.T) {
+	_, root := testFS(t)
+	sock := filepath.Join(root, "sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Skipf("unix socket unavailable: %v", err)
+	}
+	defer l.Close()
+	_, errRes := ensureWritable(sock, "write_text", map[string]any{"overwrite": true})
+	if errRes == nil || !strings.Contains(resultText(t, errRes), "non-regular") {
+		t.Fatalf("expected non-regular refusal, got: %+v", errRes)
+	}
+}
+
+func TestWriteBackupFailureLeavesNoBak(t *testing.T) {
+	_, root := testFS(t)
+	// A directory as copy source: os.Open succeeds but io.Copy fails,
+	// so the partial destination must be removed.
+	srcDir := filepath.Join(root, "srcdir")
+	if err := os.Mkdir(srcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(root, "srcdir.bak-test")
+	if err := writeBackup(srcDir, dst); err == nil {
+		t.Fatal("expected backup of a directory to fail")
+	}
+	if _, err := os.Lstat(dst); !os.IsNotExist(err) {
+		t.Fatalf("partial backup left behind: %s", dst)
+	}
+
+	// A pre-created destination directory is refused without side effects.
+	src := filepath.Join(root, "src.txt")
+	if err := os.WriteFile(src, []byte("orig"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	dstDir := filepath.Join(root, "taken.bak")
+	if err := os.Mkdir(dstDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeBackup(src, dstDir); err == nil {
+		t.Fatal("expected existing destination to be refused")
+	}
+	if fi, err := os.Lstat(dstDir); err != nil || !fi.IsDir() {
+		t.Fatalf("destination directory disturbed: %v %v", fi, err)
 	}
 }
 

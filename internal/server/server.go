@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -186,13 +188,15 @@ func (s *MCPOnlyOffice) Run() error {
 	slog.Info("bridge address", "addr", s.bridge.ListenAddr())
 
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
-		if err == context.Canceled {
-			<-done
+		cancel()
+		<-done
+		if errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) {
 			return nil
 		}
 		return err
 	}
 
+	cancel()
 	<-done
 	return nil
 }

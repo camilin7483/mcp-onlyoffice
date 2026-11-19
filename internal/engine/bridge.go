@@ -190,7 +190,8 @@ func (b *Bridge) doStartLocked(ctx context.Context) error {
 		return fmt.Errorf("empty engine path: set Bridge enginePath to the python_engine directory or runner.py")
 	}
 	if _, err := os.Stat(runnerPath); err != nil {
-		return fmt.Errorf("python engine runner not found at %s: %w", runnerPath, err)
+		slog.Debug("python engine runner missing", "runner", runnerPath, "error", err)
+		return errors.New("python engine unavailable (runner_missing)")
 	}
 
 	// The engine lifetime is managed solely by killLocked/Stop, never by a
@@ -223,7 +224,8 @@ func (b *Bridge) doStartLocked(ctx context.Context) error {
 
 	if err := cmd.Start(); err != nil {
 		cancel()
-		return fmt.Errorf("start python engine (%s %s): %w (hint: install python3 and run: pip install -r python_engine/requirements.txt)", b.pythonCmd, runnerPath, err)
+		slog.Debug("python engine start failed", "python", b.pythonCmd, "runner", runnerPath, "error", err)
+		return errors.New("python engine unavailable (start_failed)")
 	}
 
 	waitCh := make(chan struct{})
@@ -360,13 +362,14 @@ func (b *Bridge) Execute(ctx context.Context, capability string, params map[stri
 
 	// Ensure the engine is alive (restart if needed). A previous failed
 	// start leaves the bridge unavailable: refuse instead of retrying a
-	// known-bad backend. A fresh bridge (never started) still lazily
-	// starts here via ensureAlive.
+	// known-bad backend (the stored start error is already a stable,
+	// path-free "python engine unavailable (reason)" value). A fresh
+	// bridge (never started) still lazily starts here via ensureAlive.
 	if b.startErr != nil {
-		return nil, fmt.Errorf("python engine unavailable: %w", b.startErr)
+		return nil, b.startErr
 	}
 	if err := b.ensureAlive(ctx); err != nil {
-		return nil, fmt.Errorf("engine restart: %w", err)
+		return nil, err
 	}
 
 	resp, err := b.executeLocked(ctx, capability, params)
