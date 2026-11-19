@@ -1,6 +1,6 @@
 # Compiled binary
-mcp-onlyoffice
-mcp-onlyoffice.exe
+/mcp-onlyoffice
+/mcp-onlyoffice.exe
 
 # User data (document storage)
 documents/*.data
