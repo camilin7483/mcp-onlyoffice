@@ -108,3 +108,47 @@ func TestBuilderRenderRejectsBadModeAndOutsideRoots(t *testing.T) {
 		t.Error("expected IsError for input outside the allowed roots")
 	}
 }
+
+func TestBuilderRenderOverwriteGuard(t *testing.T) {
+	h, dir := builderHandlerFixture(t)
+	in := filepath.Join(dir, "in.txt")
+	if err := os.WriteFile(in, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out.docx")
+	if err := os.WriteFile(out, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Without overwrite the existing output is refused and left unchanged.
+	r, err := h.handleBuilderRender(context.Background(), map[string]any{
+		"input": in, "output": out,
+	})
+	if err != nil {
+		t.Fatalf("handler returned Go error: %v", err)
+	}
+	if !r.IsError || !strings.Contains(resultText(t, r), "overwrite=true") {
+		t.Fatalf("want the standard overwrite refusal, got: %s", resultText(t, r))
+	}
+	if data, _ := os.ReadFile(out); string(data) != "original" {
+		t.Fatalf("output changed despite refusal: %q", data)
+	}
+
+	// With overwrite:true the call succeeds and keeps a .bak- backup.
+	r, err = h.handleBuilderRender(context.Background(), map[string]any{
+		"input": in, "output": out, "overwrite": true,
+	})
+	if err != nil {
+		t.Fatalf("handler returned Go error: %v", err)
+	}
+	if r.IsError {
+		t.Fatalf("unexpected tool error: %s", resultText(t, r))
+	}
+	baks, _ := filepath.Glob(out + ".bak-*")
+	if len(baks) != 1 {
+		t.Fatalf("want one .bak- backup, got %v", baks)
+	}
+	if data, _ := os.ReadFile(baks[0]); string(data) != "original" {
+		t.Fatalf("backup = %q, want the pre-overwrite content", data)
+	}
+}

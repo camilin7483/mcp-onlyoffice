@@ -21,9 +21,13 @@ func (h *ToolHandlers) SetBuilder(b *builder.Builder) {
 	h.builder = b
 }
 
+// builderUnavailable is the user-facing text when the backend is absent. It
+// states the argv contract the shim binary must accept.
+const builderUnavailable = "document builder unavailable: set builder_path (MCP_ONLYOFFICE_BUILDER_PATH) to a shim binary accepting `<input> <output>` (convert) or `<input> <format> <output>` (render); all other tools keep working"
+
 func (h *ToolHandlers) requireBuilder() (*builder.Builder, *mcp.CallToolResult) {
 	if h.builder == nil || !h.builder.Available() {
-		return nil, textError("document builder unavailable: set builder_path (MCP_ONLYOFFICE_BUILDER_PATH) to a Document Builder binary; all other tools keep working")
+		return nil, textError(builderUnavailable)
 	}
 	return h.builder, nil
 }
@@ -51,7 +55,9 @@ func (h *ToolHandlers) handleBuilderRender(ctx context.Context, args map[string]
 	if errRes != nil {
 		return errRes, nil
 	}
-	resolvedOut, errRes := h.resolveDest(output)
+	// prepareWrite refuses an existing output unless overwrite:true and
+	// writes a .bak- backup when overwriting, like every other file writer.
+	resolvedOut, errRes := h.prepareWrite(output, overwriteOK(args))
 	if errRes != nil {
 		return errRes, nil
 	}
@@ -69,7 +75,7 @@ func (h *ToolHandlers) handleBuilderRender(ctx context.Context, args map[string]
 	}
 	if runErr != nil {
 		if errors.Is(runErr, builder.ErrUnavailable) {
-			return textError("document builder unavailable: set builder_path (MCP_ONLYOFFICE_BUILDER_PATH) to a Document Builder binary; all other tools keep working"), nil
+			return textError(builderUnavailable), nil
 		}
 		return textError("builder_render: " + runErr.Error()), nil
 	}

@@ -153,6 +153,7 @@ The server uses built-in defaults and environment variables. For a JSON configur
 | `desktop_path` | `MCP_ONLYOFFICE_DESKTOP_PATH` | Auto-detected Desktop Editors binary |
 | `log_level` | `MCP_ONLYOFFICE_LOG_LEVEL` | `info` |
 | `allowed_roots` | `MCP_ONLYOFFICE_ALLOWED_ROOTS` | Effective storage directory |
+| `builder_path` | `MCP_ONLYOFFICE_BUILDER_PATH` | Empty (disabled) |
 | `toolset` | `MCP_ONLYOFFICE_TOOLSET` | `legacy` |
 
 Set `allowed_roots` to an array of absolute directories or use a colon-separated list in the environment variable. Include the storage directory when setting custom roots if tools should access it. Python engine paths stay confined to the storage directory.

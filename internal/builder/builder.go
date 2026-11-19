@@ -9,10 +9,10 @@
 // working directory, path containment inside the allowed roots, and
 // input/output size caps.
 //
-// Process-group caveat: on timeout the whole process group is killed with
-// kill(-pid, SIGKILL) via Setpgid, which is Unix-only (no Windows equivalent
-// in this file). The server targets Linux; a Windows port needs a
-// build-tagged alternative for execute().
+// Process-group caveat: on timeout the whole process group is killed, which
+// is Unix-only (see exec_unix.go). On Windows only the direct child is killed
+// and grandchildren may survive (see exec_windows.go); keep timeouts short
+// there.
 package builder
 
 import (
@@ -26,7 +26,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/cam/mcp-onlyoffice/internal/storage"
@@ -56,9 +55,20 @@ var (
 	ErrTooLarge      = errors.New("file over size limit")
 )
 
-// binaryNames are looked up in PATH, in order, when no explicit path is
-// configured. Paths are never invented outside this list.
-var binaryNames = []string{"documentbuilder", "document-builder", "docbuilder"}
+// shimName is the only binary name ever looked up on PATH. The real
+// Document Builder CLIs are deliberately NOT auto-detected by name: their
+// argv conventions are unverified, and passing this package's positional
+// argv to the wrong binary could misinterpret model-supplied paths. A real
+// backend must either be configured explicitly via builder_path
+// (MCP_ONLYOFFICE_BUILDER_PATH) or present itself under the shim name and
+// accept this package's contract: "<binary> <input> <output>" for Convert
+// and "<binary> <input> <format> <output>" for Render.
+var binaryNames = []string{"documentbuilder-mcp-shim"}
+
+// validFormat allows short lowercase alphanumeric format tokens only. Format
+// comes from the model and is passed as an argv element; anything shaped
+// like a flag (e.g. "-l") must be rejected before spawning.
+var validFormat = regexp.MustCompile(`^[a-z][a-z0-9]{1,9}$`)
 
 // urlScheme rejects inputs that look like URLs (no network fetching).
 var urlScheme = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.\-]*://`)
@@ -75,10 +85,12 @@ type Builder struct {
 	roots   []string
 }
 
-// Detect locates the builder binary without ever failing: an explicit
-// configured path wins (and a bad one simply means unavailable, never a
-// PATH fallback); otherwise each name in binaryNames is looked up in PATH.
-// The result reports Available()==false when nothing is found.
+// Detect locates the builder backend without ever failing: an explicit
+// configured path (builder_path / MCP_ONLYOFFICE_BUILDER_PATH) wins, and a
+// bad one simply means unavailable, never a PATH fallback; otherwise only
+// the documentbuilder-mcp-shim name is looked up on PATH. The real Document
+// Builder CLIs are never auto-detected by name (their argv compatibility is
+// unproven). The result reports Available()==false when nothing is found.
 func Detect(configured string) *Builder {
 	b := &Builder{timeout: DefaultTimeout}
 	if strings.TrimSpace(configured) != "" {
@@ -162,15 +174,14 @@ func (b *Builder) Convert(ctx context.Context, input, output string) error {
 
 // Render runs: <binary> <input> <format> <output>.
 // The positional argv convention is this package's contract with the backend
-// shim; if the real Document Builder CLI differs, adapt it here (and only
-// here) so callers stay unchanged.
+// shim (see binaryNames): the backend must accept exactly this shape.
 func (b *Builder) Render(ctx context.Context, input, format, output string) error {
 	if !b.Available() {
 		return ErrUnavailable
 	}
 	format = strings.TrimSpace(format)
-	if format == "" || strings.ContainsAny(format, `/\`) || strings.Contains(format, "..") {
-		return fmt.Errorf("invalid format %q", format)
+	if !validFormat.MatchString(format) {
+		return fmt.Errorf("invalid format %q: want 2-10 lowercase alphanumeric chars", format)
 	}
 	in, err := b.resolveInput(input)
 	if err != nil {
@@ -267,13 +278,11 @@ func (b *Builder) execute(ctx context.Context, timeout time.Duration, argv []str
 	cmd := exec.CommandContext(tctx, b.path, argv...)
 	cmd.Dir = workdir
 	cmd.Env = builderEnv(workdir)
-	// Group the child so Cancel below kills grandchildren too.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Group the child so the timeout kill below reaches grandchildren too
+	// (Unix; on Windows this is a no-op and only the child dies).
+	setProcessGroup(cmd)
 	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return killProcessGroup(cmd)
 	}
 
 	var stdout, stderr bytes.Buffer

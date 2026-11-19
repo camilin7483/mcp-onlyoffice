@@ -6,11 +6,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
+
+// requireShell skips tests whose fake backend is a POSIX shell script, which
+// cannot execute on Windows.
+func requireShell(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake backend is a POSIX shell script")
+	}
+}
 
 // writeFake creates an executable shell script in dir and returns its path.
 func writeFake(t *testing.T, dir, name, body string) string {
@@ -61,8 +70,9 @@ func TestDetectEmptyPathWithoutBinaryUnavailable(t *testing.T) {
 }
 
 func TestDetectPATHLookupAndVersion(t *testing.T) {
+	requireShell(t)
 	dir := t.TempDir()
-	writeFake(t, dir, "docbuilder", "#!/bin/sh\necho 'docbuilder-test 1.2.3'\n")
+	writeFake(t, dir, "documentbuilder-mcp-shim", "#!/bin/sh\necho 'docbuilder-test 1.2.3'\n")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	b := Detect("")
@@ -75,6 +85,18 @@ func TestDetectPATHLookupAndVersion(t *testing.T) {
 	}
 	if !strings.Contains(v, "1.2.3") {
 		t.Errorf("Version = %q, want it to contain 1.2.3", v)
+	}
+}
+
+func TestDetectIgnoresRealCLINames(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // hermetic first, then add decoys below
+	dir := t.TempDir()
+	for _, name := range []string{"documentbuilder", "document-builder", "docbuilder"} {
+		writeFake(t, dir, name, "#!/bin/sh\necho real 1.0\n")
+	}
+	t.Setenv("PATH", dir)
+	if b := Detect(""); b.Available() {
+		t.Errorf("Available = true via real CLI name (found %q), want only the shim auto-detected", b.Path())
 	}
 }
 
@@ -91,6 +113,7 @@ func TestDetectExplicitPathPreferred(t *testing.T) {
 }
 
 func TestConvertSuccessMinimalEnvAndCleanup(t *testing.T) {
+	requireShell(t)
 	_, root := tempRoots(t)
 	bin := t.TempDir()
 	homeWitness := filepath.Join(t.TempDir(), "home.txt")
@@ -145,6 +168,7 @@ func TestConvertSuccessMinimalEnvAndCleanup(t *testing.T) {
 }
 
 func TestConvertTimeoutKillsProcess(t *testing.T) {
+	requireShell(t)
 	_, root := tempRoots(t)
 	bin := t.TempDir()
 	pidFile := filepath.Join(t.TempDir(), "pid.txt")
@@ -174,12 +198,13 @@ func TestConvertTimeoutKillsProcess(t *testing.T) {
 	if _, err := fmt.Sscanf(strings.TrimSpace(string(raw)), "%d", &pid); err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Kill(pid, 0); err == nil {
+	if processAlive(pid) {
 		t.Errorf("pid %d still alive after timeout, want the group killed", pid)
 	}
 }
 
 func TestConvertNonZeroExit(t *testing.T) {
+	requireShell(t)
 	_, root := tempRoots(t)
 	bin := t.TempDir()
 	secretAbs := filepath.Join(t.TempDir(), "secret-dir", "boom.txt")
@@ -209,6 +234,7 @@ func TestConvertNonZeroExit(t *testing.T) {
 }
 
 func TestConvertOutputMissing(t *testing.T) {
+	requireShell(t)
 	_, root := tempRoots(t)
 	bin := t.TempDir()
 	writeFake(t, bin, "docbuilder", "#!/bin/sh\nexit 0\n")
@@ -303,6 +329,7 @@ func TestConvertRejectsOversizedInput(t *testing.T) {
 }
 
 func TestConvertRejectsOversizedOutput(t *testing.T) {
+	requireShell(t)
 	_, root := tempRoots(t)
 	bin := t.TempDir()
 	// Sparse file just over the 1 GiB cap.
@@ -344,6 +371,7 @@ func TestConvertRejectsURLInput(t *testing.T) {
 }
 
 func TestRenderPassesFormat(t *testing.T) {
+	requireShell(t)
 	_, root := tempRoots(t)
 	bin := t.TempDir()
 	writeFake(t, bin, "docbuilder", "#!/bin/sh\necho \"got:$2\" > \"$3\"\n")
@@ -367,5 +395,30 @@ func TestRenderPassesFormat(t *testing.T) {
 	}
 	if err := b.Render(context.Background(), in, "", out); err == nil {
 		t.Error("expected an error for an empty format")
+	}
+}
+
+func TestRenderRejectsFlagLikeFormat(t *testing.T) {
+	_, root := tempRoots(t)
+	bin := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "spawned.txt")
+	writeFake(t, bin, "docbuilder", fmt.Sprintf("#!/bin/sh\ntouch %q\necho ok > \"$3\"\n", marker))
+	in := filepath.Join(root, "in.txt")
+	if err := os.WriteFile(in, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	b := Detect(filepath.Join(bin, "docbuilder"))
+	b.SetRoots([]string{root})
+	out := filepath.Join(root, "out.pdf")
+	// Format becomes an argv element, so anything flag-shaped must be
+	// rejected before spawning (no spawn happens, so this runs everywhere).
+	for _, format := range []string{"", "-l", "--help", "-o", "PDF", "p df", "a/very/long/format/name", "p.d.f", "p_d_f"} {
+		if err := b.Render(context.Background(), in, format, out); err == nil {
+			t.Errorf("format %q: expected an error", format)
+		}
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Error("backend spawned for rejected formats (marker exists)")
 	}
 }

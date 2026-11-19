@@ -423,8 +423,8 @@ func (b *Bridge) handlePair(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "pairing requires a valid nonce", http.StatusForbidden)
 		return
 	}
-	// The plugin runs inside a file:// / null-origin iframe; without this the
-	// browser blocks reading the token even though pairing is allowed.
+	// The plugin runs inside a file:// (or onlyoffice://plugin) page; without
+	// this the browser blocks reading the token even though pairing is allowed.
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	writeJSON(w, map[string]any{"token": b.token, "port": b.ListenPort(), "app": AppName, "nonce": nonce})
 }
@@ -435,10 +435,12 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 // allowedWSOrigin reports whether a WebSocket handshake Origin is acceptable:
-// absent (non-browser clients), "null" (sandboxed webviews), file://
-// (local plugin pages), or loopback http(s) origins. Real websites are rejected.
+// absent (non-browser clients), file:// (local plugin pages), or loopback
+// http(s) origins. Real websites are rejected, and so is "null": a sandboxed
+// iframe on any website sends "Origin: null", so accepting it would let any
+// web page pair, take the token and become the active editor session.
 func allowedWSOrigin(origin string) bool {
-	if origin == "" || origin == "null" {
+	if origin == "" {
 		return true
 	}
 	if origin == "file://" || strings.HasPrefix(origin, "file://") {
@@ -458,10 +460,16 @@ func allowedWSOrigin(origin string) bool {
 	return isLoopbackHost(u.Host)
 }
 
-// allowedPairOrigin is stricter than the WS rule: the plugin webview pairs
-// with no Origin, "null", or file:// only.
+// allowedPairOrigin gates /pair and /pair/challenge: only non-browser clients
+// (no Origin) and the Desktop Editors webview origins (file:// and
+// onlyoffice://plugin) may pair. "null" is rejected even though some webviews
+// send it, because a sandboxed iframe on any website also sends "null".
+// NOTE: the Desktop Editors webview is expected to present file:// or
+// onlyoffice://plugin, but this is UNVERIFIED against a live editor: if the
+// real webview sends "null", pairing from the editor will break and this gate
+// needs revisiting (see docs/desktop-bridge.md).
 func allowedPairOrigin(origin string) bool {
-	return origin == "" || origin == "null" ||
+	return origin == "" ||
 		origin == "file://" || strings.HasPrefix(origin, "file://") ||
 		strings.HasPrefix(origin, "onlyoffice://plugin")
 }

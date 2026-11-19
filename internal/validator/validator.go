@@ -144,7 +144,7 @@ func (v *Validator) checkOOXML(res *ValidationResult, data []byte, filename stri
 
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
-		res.Checks = append(res.Checks, Check{Name: "ooxml_structure", Status: "fail", Detail: "corrupt ZIP archive (" + err.Error() + "): re-upload or recreate the file"})
+		res.Checks = append(res.Checks, Check{Name: "ooxml_structure", Status: "fail", Detail: "corrupt ZIP archive (" + err.Error() + "): re-save the file and retry"})
 		return
 	}
 
@@ -438,7 +438,7 @@ func (v *Validator) checkConsistency(res *ValidationResult, data []byte, filenam
 		}
 		zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 		if err != nil {
-			res.Checks = append(res.Checks, Check{Name: "consistency", Status: "fail", Detail: "cannot open ZIP archive (" + err.Error() + "): file is corrupt, re-upload or recreate it"})
+			res.Checks = append(res.Checks, Check{Name: "consistency", Status: "fail", Detail: "cannot open ZIP archive (" + err.Error() + "): file is corrupt, re-save the file and retry"})
 			return
 		}
 

@@ -99,7 +99,7 @@ func TestTokenPersistedWith0600(t *testing.T) {
 }
 
 func TestAllowedWSOrigin(t *testing.T) {
-	accept := []string{"", "null", "file://", "file:///index.html",
+	accept := []string{"", "file://", "file:///index.html",
 		"http://127.0.0.1:2021", "https://127.0.0.1", "http://localhost:3000",
 		"https://localhost", "http://[::1]:2021", "onlyoffice://plugin"}
 	for _, o := range accept {
@@ -107,7 +107,7 @@ func TestAllowedWSOrigin(t *testing.T) {
 			t.Errorf("origin %q should be accepted", o)
 		}
 	}
-	reject := []string{"https://evil.com", "http://evil.com", "https://127.0.0.1.evil.com",
+	reject := []string{"null", "https://evil.com", "http://evil.com", "https://127.0.0.1.evil.com",
 		"http://192.168.1.1", "ftp://127.0.0.1", "ws://127.0.0.1:2021", "javascript://x"}
 	for _, o := range reject {
 		if allowedWSOrigin(o) {
@@ -196,7 +196,7 @@ func TestPairOriginRules(t *testing.T) {
 		}
 		return res.StatusCode, nil
 	}
-	for _, o := range []string{"", "null", "file://", "file:///index.html", "onlyoffice://plugin"} {
+	for _, o := range []string{"", "file://", "file:///index.html", "onlyoffice://plugin"} {
 		nonce, code := getChallenge(o)
 		if code != http.StatusOK || nonce == "" {
 			t.Errorf("challenge origin %q: status = %d, want 200 with nonce", o, code)
@@ -206,7 +206,7 @@ func TestPairOriginRules(t *testing.T) {
 			t.Errorf("pair origin %q: status = %d, want 200", o, code)
 		}
 	}
-	for _, o := range []string{"https://evil.com", "http://evil.com", "http://127.0.0.1:2021", "https://localhost"} {
+	for _, o := range []string{"null", "https://evil.com", "http://evil.com", "http://127.0.0.1:2021", "https://localhost"} {
 		if _, code := getChallenge(o); code != http.StatusForbidden {
 			t.Errorf("challenge origin %q: status = %d, want 403", o, code)
 		}
@@ -263,14 +263,18 @@ func TestWebSocketRejectsBrowserOrigin(t *testing.T) {
 	srv := serveBridge(t, b)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	h := http.Header{}
-	h.Set("Origin", "https://evil.com")
-	_, resp, err := websocket.Dial(ctx, wsURL(srv, b.Token()), &websocket.DialOptions{HTTPHeader: h})
-	if err == nil {
-		t.Fatal("browser page origin should be rejected even with valid token")
-	}
-	if resp != nil {
-		resp.Body.Close()
+	// "null" is what a sandboxed iframe on any website sends; it must fail
+	// the handshake exactly like a real website origin.
+	for _, origin := range []string{"https://evil.com", "null"} {
+		h := http.Header{}
+		h.Set("Origin", origin)
+		_, resp, err := websocket.Dial(ctx, wsURL(srv, b.Token()), &websocket.DialOptions{HTTPHeader: h})
+		if err == nil {
+			t.Fatalf("origin %q should be rejected even with valid token", origin)
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
 	}
 }
 

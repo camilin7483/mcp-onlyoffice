@@ -20,21 +20,31 @@ generated in Go (`pluginIndexHTML`), not shipped as a static asset.
 
 1. The plugin probes `http://127.0.0.1:2021..2070/ping` and only connects to a
    process that answers `{"app":"mcp-onlyoffice"}`.
-2. It calls `GET /pair` on that port. `/pair` refuses any request whose `Host`
-   is not loopback and whose `Origin` is a browser page (absent, `null`,
-   `file://` and `onlyoffice://plugin` are accepted). It answers with the
-   per-launch token and the real port.
-3. It opens `ws://127.0.0.1:<port>/plugin?token=<token>` and performs the
-   handshake below.
+2. It calls `GET /pair/challenge` on that port. `/pair/challenge` refuses any
+   request whose `Host` is not loopback and whose `Origin` is a browser page
+   (`Origin: null` included: a sandboxed iframe on any website sends `null`).
+   Absent `Origin` (non-browser clients), `file://` and `onlyoffice://plugin`
+   are accepted. It answers with a single-use nonce (60 s TTL, bound to the
+   caller IP).
+3. It calls `GET /pair?nonce=<nonce>`. The nonce is consumed before the token
+   is returned, so a replay loses. The response carries the per-launch token
+   and the real port.
+4. It opens `ws://127.0.0.1:<port>/plugin?token=<token>` and performs the
+   handshake below. The WebSocket handshake applies the same origin rule as
+   pairing (no `null`), plus loopback `http(s)` origins.
 
 The token is 32 random bytes (hex) generated per server launch, persisted 0600
 at `~/.config/mcp-onlyoffice/bridge-token` so an operator can read it. It is
 never written to the repository or to logs.
 
-**Gap (Phase B2):** `/pair` still hands the token to any local process that can
-reach loopback without a browser Origin. A nonce challenge and a
-user-confirmed pairing code are the next step. Today the security boundary is
-"same OS user, loopback only, no browser page".
+The pairing boundary is the loopback interface on a single-user machine: any
+local process or local user can reach it, because loopback HTTP cannot tell
+local users apart (peer-credential binding over a unix socket is future work).
+
+UNVERIFIED: the Desktop Editors webview is expected to present `file://` or
+`onlyoffice://plugin` as its Origin, but this was never confirmed against a
+live editor. If the real webview sends `Origin: null`, pairing from the
+editor will fail with 403 and the gate needs revisiting.
 
 ## Protocol v2
 
@@ -44,11 +54,11 @@ All frames are single JSON objects over one WebSocket.
 // plugin -> server, first frame, within 5 s
 {"type":"hello","protocol":2,"plugin_instance_id":"<uuid>","editor_type":"word",
  "capabilities":["reader.selected_text","writer.insert_text"],
- "client_version":"2.1.0"}
+ "client_version":"2.2.0"}
 
 // server -> plugin
 {"type":"hello_ack","protocol":2,"session_id":"<opaque hex>",
- "server_version":"2.1.0",
+ "server_version":"2.2.0",
  "limits":{"max_frame_bytes":1048576,"request_timeout_ms":10000}}
 
 // server -> plugin
@@ -105,8 +115,14 @@ session. A command a session does not advertise is refused with
 | `get_all_content` | `reader.full_content` | yes | no | no |
 | `insert_text` | `writer.insert_text` | yes | yes | yes |
 | `replace_text` | `writer.replace_text` | yes | no | no |
-| `create_table` | `writer.create_table` | yes | yes | yes |
-| `create_list` | `writer.create_list` | yes | yes | yes |
+| `create_table` | `writer.create_table` | yes | no | no |
+| `create_list` | `writer.create_list` | yes | no | no |
+
+Only `word` sessions advertise `reader.full_content`, `writer.replace_text`,
+`writer.create_table` and `writer.create_list`: the plugin's
+`capabilitiesFor` returns only `reader.selected_text` and
+`writer.insert_text` for cell/slide, so those commands are refused server-side
+with `unsupported_capability` when no word session is active.
 
 `reader.full_content` uses the Office API `ApiDocument.GetAllContent()`
 inside `callCommand`, which the installed 9.0.4 word engine provides. It is not

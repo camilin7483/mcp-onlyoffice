@@ -8,7 +8,7 @@ marked UNVERIFIED inline.
 | Boundary | Untrusted side | Trusted side | Enforcement |
 |---|---|---|---|
 | MCP transport | Model / client args over stdio | `ToolHandlers` | JSON arg parsing per handler; `DecodeOperation` strict validation (`internal/operations/decode.go`) |
-| Filesystem | Absolute paths from the model | Host FS | `ResolvePath` / `ResolveDest` containment (`internal/storage/storage.go`), roots = config `AllowedRoots` + store dir + cwd (`internal/server/fs_handlers.go:effectiveRoots`) |
+| Filesystem | Absolute paths from the model | Host FS | `ResolvePath` / `ResolveDest` containment (`internal/storage/storage.go`), roots = config `AllowedRoots`, defaulting to the storage dir only (`internal/config/config.go:EffectiveAllowedRoots`; the cwd fallback in `effectiveRoots` is unreachable in production because `server.New` always sets explicit roots) |
 | Plugin bridge | Local WS peer | Server process | Per-launch token, loopback-only pairing, origin gates (`internal/plugin/bridge.go`) |
 | Python engine | `runner.py` stdout | Go bridge | NDJSON parse, id correlation, 64 MiB response cap, kill-on-timeout (`internal/engine/bridge.go`) |
 | Document Builder | Builder binary output | Server process | Optional backend; argv-only exec, minimal env, throwaway workdir (`internal/builder/builder.go`) |
@@ -53,8 +53,11 @@ Known gaps:
 - Pairing: `/pair/challenge` issues a single-use nonce (60 s TTL, bound to
   caller IP, max 32 outstanding, oldest evicted). `/pair` consumes it
   before returning the token. Both endpoints are loopback-only and refuse
-  browser-page origins (`allowedPairOrigin`: only empty / `null` /
-  `file://` / `onlyoffice://plugin`).
+  `Origin: null` plus any browser-page origin (`allowedPairOrigin`: only
+  empty / `file://` / `onlyoffice://plugin`). The pairing boundary is same
+  host, any local UID: loopback HTTP cannot distinguish local users, so a
+  same-user attacker is in scope by design (unix-socket peer credentials
+  are future work).
 - WebSocket: origin gate (`allowedWSOrigin`) additionally allows loopback
   `http(s)`; token required; first frame must be `hello` within 5 s;
   protocol version must match `version.BridgeProtocol`; unknown

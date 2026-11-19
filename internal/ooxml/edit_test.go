@@ -328,8 +328,14 @@ func TestEditSetCellFormula(t *testing.T) {
 		t.Fatalf("SetCellValue formula: %v", err)
 	}
 	sheet := sheetXML(t, out, "xl/worksheets/sheet1.xml")
-	if !strings.Contains(sheet, `<c r="C1"><f>SUM(B2:B3)</f><v>0</v></c>`) {
-		t.Errorf("formula cell wrong: %s", sheet)
+	if !strings.Contains(sheet, `<c r="C1"><f>SUM(B2:B3)</f></c>`) {
+		t.Errorf("formula cell wrong (want no cached <v>0</v>): %s", sheet)
+	}
+	if strings.Contains(sheet, `<f>SUM(B2:B3)</f><v>`) {
+		t.Errorf("formula cell must not carry a cached <v>: %s", sheet)
+	}
+	if wb := sheetXML(t, out, "xl/workbook.xml"); !strings.Contains(wb, "<calcPr") || !strings.Contains(wb, `fullCalcOnLoad="1"`) {
+		t.Errorf("workbook.xml missing calcPr fullCalcOnLoad: %s", wb)
 	}
 	// sharedStrings must be untouched: plain value cells use t="str".
 	if before, after := partDigests(t, src)["xl/sharedStrings.xml"], partDigests(t, out)["xl/sharedStrings.xml"]; before != after {

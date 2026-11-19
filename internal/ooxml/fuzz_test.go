@@ -83,7 +83,7 @@ func FuzzZipParts(f *testing.F) {
 		var total int64
 		for _, e := range entries {
 			if int64(len(e.data)) > maxEditBytes {
-				t.Fatalf("part %s = %d bytes, over the %d cap", e.name, len(e.data), maxEditBytes)
+				t.Fatalf("part %s = %d bytes, over the %d cap", e.header.Name, len(e.data), maxEditBytes)
 			}
 			total += int64(len(e.data))
 		}

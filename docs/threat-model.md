@@ -9,8 +9,9 @@ Scope: the code as committed. UNVERIFIED marks claims no code confirms.
 - Metadata sidecar `.metadata.json` (filenames, sizes, refs).
 - Bridge token file `~/.config/mcp-onlyoffice/bridge-token` (`0600`).
 - Audit log `<storageDir>/audit.jsonl` (`0600`).
-- Host filesystem reachable through allowed roots (store dir + process
-  cwd by default; config `AllowedRoots` otherwise).
+- Host filesystem reachable through allowed roots (the storage dir by
+  default; config `AllowedRoots` otherwise — the cwd fallback in
+  `effectiveRoots` is unreachable in production).
 
 ## 2. Actors
 
@@ -32,7 +33,7 @@ Scope: the code as committed. UNVERIFIED marks claims no code confirms.
 | T3 | A1 entity-expansion / DTD attack | `encoding/xml` rejects custom entities; `wellFormed` fails and edits abort (`hostile_test.go:TestHostileDTDEntity`) | External DTD fetch never attempted (no resolver configured) |
 | T4 | A1 malformed `.rels` / truncation crash | Parsers return errors, never panic; fuzzed (`internal/ooxml/fuzz_test.go`, `hostile_test.go`) | Fuzzing is seed+10 s runs, not continuous |
 | T5 | A2 symlink / traversal escape | `ResolvePath`/`ResolveDest` + extraction re-resolution; covered by `local_test.go`, `fs_handlers_test.go` | **TOCTOU + hardlinks**: no `openat2`, no hardlink checks (see `docs/security.md`) |
-| T6 | A2 token theft / rogue pairing | Token `0600`, loopback-only pairing, single-use IP-bound nonces, origin gates (`internal/plugin/bridge.go`) | Same-user process can read the token file; accepted (OS-user trust boundary) |
+| T6 | A2 token theft / rogue pairing | Token `0600`, loopback-only pairing, single-use IP-bound nonces, `Origin: null` and browser-page origin gates (`internal/plugin/bridge.go`) | Same-host, any-local-UID process can reach loopback pairing: HTTP cannot tell local users apart, so this is the accepted boundary, not just same-user (unix-socket peer credentials are future work); a same-user process can also read the token file directly |
 | T7 | A2 port hijack before bridge binds | Bridge scans 50 ports from base then random fallback with a warning; plugin only discovers the scanned range | Fallback port is undiscoverable by design; hijack of the chosen port pre-bind is UNVERIFIED (no pre-bind check) |
 | T8 | A3 hostile operation args | `DecodeOperation` allowlist (name pattern, non-zero target, param key pattern, 64 KiB cap), registry + risk policy (`internal/operations/*`) | Approved-sensitive mutations rely on the operator reading diffs |
 | T9 | A3 exfiltration via tool results | Health/ping expose counts only; errors never echo params; builder stderr scrubbed | Audit log contains absolute paths; tool results legitimately contain document bytes the model asked to read |

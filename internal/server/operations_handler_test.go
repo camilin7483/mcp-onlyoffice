@@ -156,6 +156,7 @@ func TestDocumentOperationReplaceReceipt(t *testing.T) {
 	before, _ := os.ReadFile(p)
 	args := opArgs("ooxml.docx.replace_paragraph_text", p, map[string]any{"paragraph": float64(1)})
 	args["params"] = map[string]any{"text": "Beta-live"}
+	args["approve"] = true
 	raw, isErr := callOp(t, h, args)
 	if isErr {
 		t.Fatalf("replace error: %s", raw)
@@ -296,6 +297,7 @@ func TestDocumentOperationCellSet(t *testing.T) {
 	}
 	args := opArgs("ooxml.xlsx.set_cell", p, nil)
 	args["params"] = map[string]any{"sheet": "Data", "cell": "B2", "value": "9"}
+	args["approve"] = true
 	raw, isErr := callOp(t, h, args)
 	if isErr {
 		t.Fatalf("set_cell error: %s", raw)
