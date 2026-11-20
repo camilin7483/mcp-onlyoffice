@@ -3,6 +3,7 @@ package plugin
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -19,6 +20,12 @@ func TestResolvePluginDirOverrideWins(t *testing.T) {
 
 func TestResolvePluginDirDefault(t *testing.T) {
 	dir, err := ResolvePluginDir("")
+	if runtime.GOOS != "linux" {
+		if dir != "" || err == nil || !strings.Contains(err.Error(), "-plugin-dir") {
+			t.Fatalf("default on %s = %q, %v; want an error naming -plugin-dir", runtime.GOOS, dir, err)
+		}
+		return
+	}
 	if err != nil {
 		t.Fatalf("ResolvePluginDir: %v", err)
 	}

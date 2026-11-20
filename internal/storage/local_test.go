@@ -223,8 +223,13 @@ func TestResolvePathInsideRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolvePath: %v", err)
 	}
-	if got != filepath.Clean(p) {
-		t.Errorf("resolved = %q, want %q", got, filepath.Clean(p))
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(canonicalRoot, "sub", "file.txt")
+	if got != want {
+		t.Errorf("resolved = %q, want %q", got, want)
 	}
 }
 
