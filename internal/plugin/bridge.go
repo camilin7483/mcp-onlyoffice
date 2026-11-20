@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -38,7 +39,7 @@ const (
 	helloWindow = 5 * time.Second
 	// defaultRequestTimeout applies when the caller passes no timeout.
 	defaultRequestTimeout = 10 * time.Second
-	// scanPorts is how many ports from base are tried before a random fallback.
+	// scanPorts limita el rango de descubrimiento del complemento.
 	scanPorts = 50
 )
 
@@ -92,11 +93,10 @@ type pendingReq struct {
 }
 
 // sessionEntry is a Session plus its live connection state. Writes are
-// serialised with writeMu because websocket writes are not concurrent-safe.
+// coordinated by the WebSocket connection and the registry.
 type sessionEntry struct {
 	Session
 	conn      *websocket.Conn
-	writeMu   sync.Mutex
 	pending   map[string]*pendingReq
 	completed map[string]time.Time
 }
@@ -114,6 +114,7 @@ type Bridge struct {
 	// never held while blocking in Serve.
 	mu        sync.RWMutex
 	srv       *http.Server
+	stopped   bool
 	token     string
 	tokenPath string
 	// Pairing challenges: single-use nonces bound to the requesting IP.
@@ -188,8 +189,17 @@ func persistToken(path, token string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return fmt.Errorf("mkdir token dir: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(token+"\n"), 0600); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".bridge-token-*")
+	if err != nil {
+		return fmt.Errorf("stage token: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+	_, writeErr := tmp.WriteString(token + "\n")
+	if err := errors.Join(writeErr, tmp.Close()); err != nil {
 		return fmt.Errorf("write token: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return fmt.Errorf("replace token: %w", err)
 	}
 	return nil
 }
@@ -222,45 +232,54 @@ func (b *Bridge) ListenPort() int {
 func (b *Bridge) Start() error {
 	var listener net.Listener
 	var err error
-	chosen := 0
 	for port := b.port; port < b.port+scanPorts; port++ {
 		addr := fmt.Sprintf("127.0.0.1:%d", port)
 		listener, err = net.Listen("tcp", addr)
 		if err == nil {
-			chosen = port
 			break
 		}
 	}
 	if listener == nil {
-		// Last resort: random port. The plugin only scans the bounded range,
-		// so this fallback is unreachable by discovery; say so explicitly.
-		listener, err = net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			return fmt.Errorf("bridge listen: %w", err)
-		}
-		chosen = listener.Addr().(*net.TCPAddr).Port
-		slog.Warn("bridge on random port outside plugin scan range; plugin discovery will not find it",
-			"port", chosen)
+		return fmt.Errorf("no loopback port available in the configured discovery range starting at %d: %w", b.port, err)
 	}
-	b.setRealPort(chosen)
-
-	b.srv = &http.Server{
-		Addr:    listener.Addr().String(),
-		Handler: b.handler(),
+	chosen := listener.Addr().(*net.TCPAddr).Port
+	srv := &http.Server{
+		Addr:              listener.Addr().String(),
+		Handler:           b.handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       30 * time.Second,
 	}
+	b.mu.Lock()
+	if b.stopped || b.srv != nil {
+		b.mu.Unlock()
+		_ = listener.Close()
+		return nil
+	}
+	b.srv = srv
+	b.realPort = chosen
+	b.mu.Unlock()
 
 	slog.Info("WebSocket bridge", "addr", fmt.Sprintf("ws://127.0.0.1:%d/plugin", b.ListenPort()))
 
-	if err := b.srv.Serve(listener); err != nil && err != http.ErrServerClosed {
+	if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
 }
 
 func (b *Bridge) Stop() {
-	if b.srv != nil {
-		b.srv.Close()
+	b.mu.Lock()
+	b.stopped = true
+	srv := b.srv
+	b.mu.Unlock()
+	if srv != nil {
+		_ = srv.Close()
 	}
+	b.reg.mu.Lock()
+	for _, entry := range b.reg.sessions {
+		_ = entry.conn.CloseNow()
+	}
+	b.reg.mu.Unlock()
 }
 
 func (b *Bridge) handler() http.Handler {
@@ -685,6 +704,10 @@ func (b *Bridge) Sessions() []SessionInfo {
 
 // SendTo runs one command on the named session.
 func (b *Bridge) SendTo(sessionID, method string, params map[string]any, timeout time.Duration) (any, error) {
+	return b.SendToContext(context.Background(), sessionID, method, params, timeout)
+}
+
+func (b *Bridge) SendToContext(ctx context.Context, sessionID, method string, params map[string]any, timeout time.Duration) (any, error) {
 	entry := b.reg.get(sessionID)
 	if entry == nil {
 		if b.reg.Count() == 0 {
@@ -692,16 +715,24 @@ func (b *Bridge) SendTo(sessionID, method string, params map[string]any, timeout
 		}
 		return nil, errSessionNotFound(sessionID)
 	}
-	return b.sendOnEntry(context.Background(), entry, method, params, timeout)
+	return b.sendOnEntry(ctx, entry, method, params, timeout)
 }
 
-// SendCommand runs one command on the active session (most recently
-// connected or used). It keeps the legacy signature used by the six editor
-// tool handlers.
+// SendCommand conserva las llamadas sin identificador cuando solo hay un editor abierto.
 func (b *Bridge) SendCommand(ctx context.Context, method string, params map[string]any, timeout time.Duration) (any, error) {
-	entry := b.reg.active()
-	if entry == nil {
+	b.reg.mu.Lock()
+	count := len(b.reg.sessions)
+	var entry *sessionEntry
+	for _, session := range b.reg.sessions {
+		entry = session
+		break
+	}
+	b.reg.mu.Unlock()
+	if count == 0 {
 		return nil, errNotConnected()
+	}
+	if count > 1 {
+		return nil, errPluginError("multiple Desktop editor sessions are connected; select a session explicitly or close the other documents")
 	}
 	return b.sendOnEntry(ctx, entry, method, params, timeout)
 }
@@ -710,6 +741,8 @@ func (b *Bridge) sendOnEntry(ctx context.Context, entry *sessionEntry, method st
 	if timeout <= 0 {
 		timeout = defaultRequestTimeout
 	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	// Refuse commands the session did not advertise; never assume the
 	// editor supports them.
 	if need, ok := methodCapabilities[method]; ok && need != "" && !entry.Capabilities[need] {
@@ -750,17 +783,12 @@ func (b *Bridge) sendOnEntry(ctx context.Context, entry *sessionEntry, method st
 	if err := ctx.Err(); err != nil {
 		return fail(errTimeout("timeout before write: " + err.Error()))
 	}
-	entry.writeMu.Lock()
-	werr := entry.conn.Write(ctx, websocket.MessageText, cmd)
-	entry.writeMu.Unlock()
-	if werr != nil {
+	if werr := entry.conn.Write(ctx, websocket.MessageText, cmd); werr != nil {
 		// The write failed partway: the command may have reached the
 		// plugin, so the outcome is unknown.
 		return fail(&RPCError{Code: CodePluginError, Message: "write: " + werr.Error(), Retriable: true, OutcomeUnknown: true})
 	}
 
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
 	select {
 	case r, ok := <-ch:
 		if !ok {
@@ -794,19 +822,12 @@ func (b *Bridge) sendOnEntry(ctx context.Context, entry *sessionEntry, method st
 		}
 		b.reg.touch(entry.ID)
 		return resp.Result, nil
-	case <-timer.C:
-		// The command bytes were written but no reply arrived: outcome unknown.
-		b.reg.mu.Lock()
-		delete(entry.pending, id)
-		markCompletedLocked(entry, id)
-		b.reg.mu.Unlock()
-		return nil, errOutcomeUnknown("timeout waiting for plugin response (outcome unknown: command was sent)")
 	case <-ctx.Done():
 		b.reg.mu.Lock()
 		delete(entry.pending, id)
 		markCompletedLocked(entry, id)
 		b.reg.mu.Unlock()
-		return nil, &RPCError{Code: CodeTimeout, Message: "context done waiting for plugin response: " + ctx.Err().Error(), Retriable: true, OutcomeUnknown: true}
+		return nil, errOutcomeUnknown("waiting for plugin response: " + ctx.Err().Error())
 	}
 }
 

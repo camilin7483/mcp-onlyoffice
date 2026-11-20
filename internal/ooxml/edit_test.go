@@ -350,7 +350,7 @@ func TestEditSetCellNumberFormat(t *testing.T) {
 		t.Fatalf("SetCellValue number format: %v", err)
 	}
 	sheet := sheetXML(t, out, "xl/worksheets/sheet1.xml")
-	if !strings.Contains(sheet, `r="B2" t="str" s="`) {
+	if !strings.Contains(sheet, `r="B2" t="n" s="`) {
 		t.Errorf("B2 missing style index: %s", sheet)
 	}
 	styles := sheetXML(t, out, "xl/styles.xml")

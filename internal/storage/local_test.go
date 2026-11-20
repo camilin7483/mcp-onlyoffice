@@ -276,3 +276,101 @@ func TestResolveDestRefusesLeafSymlink(t *testing.T) {
 		t.Error("ResolveDest outside parent: want error, got nil")
 	}
 }
+
+func TestDesktopPathPreservesManagedDocumentAcrossRenames(t *testing.T) {
+	s := newTestStore(t)
+	doc, err := s.Create("Old.DOCX", []byte("original"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := s.Create("Reference.txt", []byte("reference"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddRef(doc.ID, ref.ID); err != nil {
+		t.Fatal(err)
+	}
+	path, err := s.DesktopPath(doc.ID)
+	if err != nil || filepath.Ext(path) != ".docx" {
+		t.Fatalf("DesktopPath = %q, %v", path, err)
+	}
+	if _, err := os.Stat(filepath.Join(s.BaseDir(), doc.ID+".data")); !os.IsNotExist(err) {
+		t.Fatalf("legacy payload still exists: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("saved by editor"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	renamed, err := s.Rename(doc.ID, "New.docx")
+	if err != nil || renamed.ID != doc.ID || len(renamed.Refs) != 1 || renamed.Refs[0] != ref.ID {
+		t.Fatalf("Rename = %+v, %v", renamed, err)
+	}
+	if current, err := s.DesktopPath(doc.ID); err != nil || current != path {
+		t.Fatalf("DesktopPath after rename = %q, %v", current, err)
+	}
+	if got, err := s.GetData(doc.ID); err != nil || string(got) != "saved by editor" {
+		t.Fatalf("GetData = %q, %v", got, err)
+	}
+}
+
+func TestTwoStoresKeepAllConcurrentCreates(t *testing.T) {
+	first := newTestStore(t)
+	second, err := NewLocalStore(first.BaseDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 20)
+	for i := range 20 {
+		store := first
+		if i%2 == 1 {
+			store = second
+		}
+		go func() {
+			<-start
+			_, err := store.Create("sample.txt", []byte("content"))
+			results <- err
+		}()
+	}
+	close(start)
+	for range 20 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	docs, err := second.List()
+	if err != nil || len(docs) != 20 {
+		t.Fatalf("List found %d documents: %v", len(docs), err)
+	}
+}
+
+func TestStoreRefusesUpdateAndDeleteWhileEditorIsOpen(t *testing.T) {
+	s := newTestStore(t)
+	doc, err := s.Create("Example.docx", []byte("original"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := s.DesktopPath(doc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(s.BaseDir(), ".~lock."+filepath.Base(path)+"#")
+	if err := os.WriteFile(marker, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Update(doc.ID, []byte("new")); err == nil {
+		t.Fatal("updated an open document")
+	}
+	if err := s.Delete(doc.ID); err == nil {
+		t.Fatal("deleted an open document")
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := s.GetData(doc.ID); err != nil || string(data) != "original" {
+		t.Fatalf("original = %q, %v", data, err)
+	}
+	updated, err := s.Update(doc.ID, []byte("new"))
+	if err != nil || updated.Size != 3 {
+		t.Fatalf("updated = %+v, %v", updated, err)
+	}
+}

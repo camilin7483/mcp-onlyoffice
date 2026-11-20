@@ -80,42 +80,20 @@ def _is_path_key(key: str) -> bool:
     return any(marker in lowered for marker in PATH_KEY_MARKERS)
 
 
-def _looks_like_path(value: str) -> bool:
-    """Heuristic: only values that could name a file are path-checked.
-
-    Escapes require an absolute path, a separator, or "..", so those are
-    always checked; dotted basenames ("report.xlsx") are checked too while
-    plain ids/tokens ("abc123") are left alone.
-    """
-    if not value or "\x00" in value:
-        return True  # let the confinement check reject it with a clear error
-    if os.path.isabs(value):
-        return True
-    if "/" in value or "\\" in value:
-        return True
-    if value.startswith("~"):
-        return True
-    if value in (".", ".."):
-        return True
-    basename = value.replace("\\", "/").rsplit("/", 1)[-1]
-    return "." in basename
-
-
 def is_within_dir(value: str, allowed: str) -> bool:
     """True when value resolves inside allowed (or equals it)."""
-    expanded = os.path.expanduser(value)
-    if os.path.isabs(expanded):
-        resolved = os.path.realpath(expanded)
-    else:
-        resolved = os.path.realpath(os.path.join(allowed, expanded))
-    return resolved == allowed or resolved.startswith(allowed + os.sep)
+    resolved = os.path.realpath(os.path.join(allowed, value))
+    try:
+        return os.path.normcase(os.path.commonpath((resolved, allowed))) == os.path.normcase(allowed)
+    except ValueError:
+        return False
 
 
 def check_path_confinement(params, allowed: str) -> dict:
     """Reject output path args resolving outside the allowed dir.
 
     Walks params (including nested dicts/lists); any string value under a
-    path-like key that looks like a path must resolve inside allowed.
+    path-like key must resolve inside allowed.
     Absolute paths that escape and any ".." segment are rejected.
 
     Returns {"valid": bool, "error": str (only when invalid)}.
@@ -129,16 +107,22 @@ def check_path_confinement(params, allowed: str) -> dict:
 def _walk_paths(node, allowed: str) -> str | None:
     if isinstance(node, dict):
         for key, value in node.items():
-            if isinstance(key, str) and isinstance(value, str):
-                if _is_path_key(key) and _looks_like_path(value):
-                    parts = value.replace("\\", "/").split("/")
-                    if ".." in parts:
-                        return f"Path traversal rejected in param {key!r}: {value!r}"
-                    if "\x00" in value:
+            if isinstance(key, str) and (key == "data_csv" or _is_path_key(key)):
+                candidates = value if isinstance(value, (list, tuple)) else (value,)
+                for path in candidates:
+                    if not isinstance(path, str) or not path:
+                        continue
+                    if ".." in path.replace("\\", "/").split("/"):
+                        return f"Path traversal rejected in param {key!r}: {path!r}"
+                    if "\x00" in path:
                         return f"Invalid path in param {key!r}: NUL byte"
-                    if not is_within_dir(value, allowed):
-                        return (f"Path {value!r} in param {key!r} is outside "
-                                f"the allowed output dir ({allowed})")
+                    name = os.path.basename(os.path.realpath(os.path.join(allowed, path))).lower()
+                    if name in (".metadata.json", "audit.jsonl", ".mcp-onlyoffice.lock", ".mcp-tool-writes.lock") or (
+                        name.startswith(".~lock.") and name.endswith("#")
+                    ):
+                        return f"Path in param {key!r} refers to an internal control file"
+                    if not is_within_dir(path, allowed):
+                        return f"Path in param {key!r} is outside the allowed output dir"
             err = _walk_paths(value, allowed)
             if err:
                 return err

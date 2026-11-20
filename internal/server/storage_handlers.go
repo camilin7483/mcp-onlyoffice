@@ -55,16 +55,9 @@ func (h *ToolHandlers) handleRename(ctx context.Context, args map[string]any) (*
 	if id == "" || newName == "" {
 		return textError("id and new_filename are required"), nil
 	}
-	data, err := h.store.GetData(id)
+	doc, err := h.store.Rename(id, newName)
 	if err != nil {
-		return textError("source not found: " + err.Error()), nil
-	}
-	if err := h.store.Delete(id); err != nil {
-		return textError("delete original: " + err.Error()), nil
-	}
-	doc, err := h.store.Create(newName, data)
-	if err != nil {
-		return textError("create renamed: " + err.Error()), nil
+		return textError("rename failed: " + err.Error()), nil
 	}
 	return jsonResult(doc), nil
 }

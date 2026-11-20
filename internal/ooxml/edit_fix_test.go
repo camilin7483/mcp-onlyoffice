@@ -359,7 +359,7 @@ func TestEditBenchStyles(t *testing.T) {
 	b.WriteString(`</cellXfs></styleSheet>`)
 	styles := []byte(b.String())
 	start := time.Now()
-	idx, out, err := ensureNumberFormat(styles, "0.00")
+	idx, out, err := ensureNumberFormat(styles, "0.00", 0)
 	if err != nil {
 		t.Fatalf("ensureNumberFormat: %v", err)
 	}
@@ -401,7 +401,7 @@ func TestEditNumFmtsNoCount(t *testing.T) {
 	styles := stylesWithNumFmts(
 		`<numFmts><numFmt numFmtId="164" formatCode="#,##0.00"/></numFmts>`,
 		`<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>`)
-	idx, out, err := ensureNumberFormat([]byte(styles), "0.000")
+	idx, out, err := ensureNumberFormat([]byte(styles), "0.000", 0)
 	if err != nil {
 		t.Fatalf("ensureNumberFormat no-count: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestEditNumFmtsNoCount(t *testing.T) {
 
 func TestEditSelfClosingNumFmtsCellXfs(t *testing.T) {
 	styles := stylesWithNumFmts(`<numFmts/>`, `<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>`)
-	_, out, err := ensureNumberFormat([]byte(styles), "0.00")
+	_, out, err := ensureNumberFormat([]byte(styles), "0.00", 0)
 	if err != nil {
 		t.Fatalf("self-closing numFmts: %v", err)
 	}
@@ -435,7 +435,7 @@ func TestEditSelfClosingNumFmtsCellXfs(t *testing.T) {
 	styles2 := stylesWithNumFmts(
 		`<numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0.00"/></numFmts>`,
 		`<cellXfs/>`)
-	idx, out2, err := ensureNumberFormat([]byte(styles2), "#,##0.00")
+	idx, out2, err := ensureNumberFormat([]byte(styles2), "#,##0.00", 0)
 	if err != nil {
 		t.Fatalf("self-closing cellXfs: %v", err)
 	}
@@ -450,5 +450,83 @@ func TestEditSelfClosingNumFmtsCellXfs(t *testing.T) {
 	}
 	if ok := wellFormed([]byte(out2)); ok != nil {
 		t.Errorf("malformed: %v", ok)
+	}
+}
+
+func TestEditStyledEmptyRow(t *testing.T) {
+	src := xlsxFixture(t)
+	parts := unzipParts(t, src)
+	parts["xl/worksheets/sheet1.xml"] = []byte(`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>` +
+		`<row r="2" ht="22" customHeight="1"/><row r="3"><c r="A3"><v>3</v></c></row></sheetData></worksheet>`)
+	zr, err := zip.NewReader(bytes.NewReader(src), int64(len(src)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	for _, f := range zr.File {
+		order = append(order, f.Name)
+	}
+	out, err := SetCellValue(buildZip(t, parts, order), "Data", "B2", "updated", false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sheet := sheetXML(t, out, "xl/worksheets/sheet1.xml")
+	if !strings.Contains(sheet, `<row r="2" ht="22" customHeight="1"><c r="B2"`) ||
+		!strings.Contains(sheet, `</row><row r="3"><c r="A3"><v>3</v></c></row>`) {
+		t.Fatalf("row styles or adjacent content changed: %s", sheet)
+	}
+}
+
+func TestNumberFormatPreservesOtherCellProperties(t *testing.T) {
+	src := xlsxFixture(t)
+	parts := unzipParts(t, src)
+	path := "xl/worksheets/sheet1.xml"
+	parts[path] = []byte(`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="2"><c r="A2" s="1"><v>2</v></c><c r="B2" s="1"><v>3</v></c></row></sheetData></worksheet>`)
+	base := `<xf numFmtId="0" fontId="2" fillId="3" borderId="4" xfId="0" applyAlignment="1"><alignment horizontal="right"/><protection locked="0"/></xf>`
+	other := `<xf numFmtId="164" fontId="5" fillId="0"/>`
+	parts["xl/styles.xml"] = []byte(stylesWithNumFmts(
+		`<numFmts count="1"><numFmt numFmtId="164" formatCode="0.00"/></numFmts>`,
+		`<cellXfs count="3"><xf numFmtId="0" fontId="0"/>`+base+other+`</cellXfs>`))
+	zr, _ := zip.NewReader(bytes.NewReader(src), int64(len(src)))
+	var order []string
+	for _, f := range zr.File {
+		order = append(order, f.Name)
+	}
+	result, err := SetCellValue(buildZip(t, parts, order), "Data", "A2", "9.5", false, "0.00")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sheet := sheetXML(t, result, path)
+	if !strings.Contains(sheet, `r="A2" t="n" s="3"><v>9.5</v>`) ||
+		!strings.Contains(sheet, `r="B2" s="1"><v>3</v>`) {
+		t.Fatal(sheet)
+	}
+	styles := sheetXML(t, result, "xl/styles.xml")
+	if !strings.Contains(styles, base) || !strings.Contains(styles, other) ||
+		!strings.Contains(styles, `fontId="2" fillId="3" borderId="4" xfId="0" applyAlignment="1" numFmtId="164" applyNumberFormat="1"><alignment horizontal="right"/><protection locked="0"/>`) {
+		t.Fatal(styles)
+	}
+	result, err = SetCellValue(result, "Data", "B2", "0012", false, "0.00")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated := sheetXML(t, result, "xl/styles.xml"); updated != styles {
+		t.Fatal("equivalent derivative style was not reused")
+	}
+	if sheet := sheetXML(t, result, path); !strings.Contains(sheet, `r="B2" t="str" s="3"><v>0012</v>`) {
+		t.Fatal(sheet)
+	}
+}
+
+func TestNumericCellValueAvoidsLosingTextOrPrecision(t *testing.T) {
+	for _, value := range []string{"0012", "1234567890123456", "NaN", "1e-9999", "9.50 USD"} {
+		if isNumericCellValue(value) {
+			t.Errorf("%q must remain text", value)
+		}
+	}
+	for _, value := range []string{"0", "-1.05", "0.05", "9.50", "1e8"} {
+		if !isNumericCellValue(value) {
+			t.Errorf("%q must be numeric", value)
+		}
 	}
 }

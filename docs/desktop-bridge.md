@@ -103,8 +103,8 @@ Rules enforced by the server:
 capabilities, document id, revision and the active flag. No addresses and no
 tokens.
 
-Legacy editor tools (`get_selected_text`, `insert_text`, …) target the active
-session. A command a session does not advertise is refused with
+Legacy editor tools (`get_selected_text`, `insert_text`, …) require exactly one
+connected session. Typed edits can select a specific session by ID. A command a session does not advertise is refused with
 `unsupported_capability` before anything is written to the socket.
 
 ## Capabilities
@@ -122,12 +122,13 @@ Only `word` sessions advertise `reader.full_content`, `writer.replace_text`,
 `writer.create_table` and `writer.create_list`: the plugin's
 `capabilitiesFor` returns only `reader.selected_text` and
 `writer.insert_text` for cell/slide, so those commands are refused server-side
-with `unsupported_capability` when no word session is active.
+with `unsupported_capability` when the selected session does not support the operation.
 
-`reader.full_content` uses the Office API `ApiDocument.GetAllContent()`
-inside `callCommand`, which the installed 9.0.4 word engine provides. It is not
-a plugin `executeMethod`, and it does not exist for cell or slide documents,
-so those sessions do not advertise it.
+`reader.full_content` returns Word paragraph text via
+`ApiDocument.GetAllParagraphs()` and `GetText()`. It does not promise a complete
+representation of headers, notes, images or other non-paragraph objects.
+The plugin accepts one in-flight command per editor session to keep SDK
+callbacks and command parameters isolated.
 
 The plugin dispatches on a closed `switch` of method names. There is no path
 from model text to JavaScript, macros or arbitrary `callCommand` source.

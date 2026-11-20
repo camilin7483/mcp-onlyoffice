@@ -23,7 +23,7 @@ func TestDocumentOperationAtomicWriteFailurePreservesOriginal(t *testing.T) {
 	before, _ := os.ReadFile(p)
 
 	oldWrite := writeAtomicFile
-	writeAtomicFile = func(string, []byte, os.FileMode) error {
+	writeAtomicFile = func(string, []byte, os.FileMode, func() error) error {
 		return errors.New("no space left on device")
 	}
 	t.Cleanup(func() { writeAtomicFile = oldWrite })
@@ -287,7 +287,7 @@ func TestDocumentOperationWritesAuditEntry(t *testing.T) {
 		t.Fatalf("audit logger: %v", err)
 	}
 	defer al.Close()
-	fsAudit = al
+	h.SetAuditLogger(al)
 
 	p := opFixture(t, root, "aud.docx")
 	probe := "ZxqAuditProbe9"
@@ -317,5 +317,38 @@ func TestDocumentOperationWritesAuditEntry(t *testing.T) {
 	}
 	if strings.Contains(entry, probe) {
 		t.Errorf("audit entry must not contain document content: %s", entry)
+	}
+}
+
+func TestDocumentOperationRetainsExternalEditBeforeCommit(t *testing.T) {
+	h, root := testFS(t)
+	path := opFixture(t, root, "external.docx")
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	external, err := ooxml.ReplaceParagraphText(original, 0, "External edit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldWrite := writeAtomicFile
+	writeAtomicFile = func(path string, data []byte, mode os.FileMode, check func() error) error {
+		return oldWrite(path, data, mode, func() error {
+			if err := os.WriteFile(path, external, mode); err != nil {
+				return err
+			}
+			return check()
+		})
+	}
+	t.Cleanup(func() { writeAtomicFile = oldWrite })
+	args := opArgs("ooxml.docx.replace_paragraph_text", path, map[string]any{"paragraph": 0})
+	args["params"] = map[string]any{"text": "MCP edit"}
+	args["approve"] = true
+	message, failed := callOp(t, h, args)
+	if !failed || !strings.Contains(message, "revision conflict") {
+		t.Fatalf("operation result = %s", message)
+	}
+	if current, err := os.ReadFile(path); err != nil || string(current) != string(external) {
+		t.Fatalf("external edit was not kept: %v", err)
 	}
 }

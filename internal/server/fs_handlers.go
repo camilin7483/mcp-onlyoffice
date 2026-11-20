@@ -26,8 +26,6 @@ import (
 // Filesystem hardening knobs. Package-level (instead of ToolHandlers fields)
 // so no struct change is needed; tests override them as hooks.
 var (
-	fsRoots    []string
-	fsAudit    *auditlog.Logger
 	fsMaxWrite = storage.MaxWriteBytes
 	fsMaxRead  = storage.MaxReadBytes
 	fsMaxWalk  = storage.MaxWalkEntries
@@ -41,19 +39,19 @@ const maxHeadTailLines = 1000
 
 // SetAuditLogger wires the JSONL audit logger (called from server.New).
 func (h *ToolHandlers) SetAuditLogger(l *auditlog.Logger) {
-	fsAudit = l
+	h.fsAudit = l
 }
 
 // SetAllowedRoots overrides the allowed filesystem roots.
 func (h *ToolHandlers) SetAllowedRoots(roots ...string) {
-	fsRoots = append([]string(nil), roots...)
+	h.fsRoots = append([]string(nil), roots...)
 }
 
 // effectiveRoots returns the configured roots, falling back to the document
 // storage dir plus the current working directory.
 func (h *ToolHandlers) effectiveRoots() []string {
-	if len(fsRoots) > 0 {
-		return fsRoots
+	if len(h.fsRoots) > 0 {
+		return h.fsRoots
 	}
 	var roots []string
 	if h.store != nil {
@@ -82,15 +80,37 @@ func (h *ToolHandlers) resolveDest(p string) (string, *mcp.CallToolResult) {
 	if err != nil {
 		return "", textError(err.Error())
 	}
+	if h.isStorageControlFile(rp) {
+		return "", textError("refusing to modify a storage control file")
+	}
+	if err := storage.CheckDesktopWrite(rp); err != nil && !os.IsNotExist(err) {
+		return "", textError(err.Error())
+	}
 	return rp, nil
 }
 
+func (h *ToolHandlers) isStorageControlFile(path string) bool {
+	name := strings.ToLower(filepath.Base(path))
+	if name == storage.LockFilename || name == storage.ToolLockFilename || (strings.HasPrefix(name, ".~lock.") && strings.HasSuffix(name, "#")) {
+		return true
+	}
+	if h.store == nil || !storage.IsAllowedRoot(filepath.Dir(path), []string{h.store.BaseDir()}) {
+		return false
+	}
+	switch name {
+	case ".metadata.json", "audit.jsonl":
+		return true
+	default:
+		return false
+	}
+}
+
 // auditLog records an audit entry when a logger is wired (nil-safe).
-func auditLog(action, target, outcome string, detail map[string]any) {
-	if fsAudit == nil {
+func (h *ToolHandlers) auditLog(action, target, outcome string, detail map[string]any) {
+	if h.fsAudit == nil {
 		return
 	}
-	fsAudit.Audit(action, target, outcome, detail)
+	h.fsAudit.Audit(action, target, outcome, detail)
 }
 
 // statWithinLimit stats path with Lstat and rejects dirs and files over fsMaxRead.
@@ -101,6 +121,9 @@ func statWithinLimit(path string) (fs.FileInfo, *mcp.CallToolResult) {
 	}
 	if info.IsDir() {
 		return nil, textError(fmt.Sprintf("path %q is a directory, not a file", path))
+	}
+	if !info.Mode().IsRegular() {
+		return nil, textError(fmt.Sprintf("refusing to read non-regular file: %s", path))
 	}
 	if info.Size() > fsMaxRead {
 		return nil, textError(fmt.Sprintf("file %q is %d bytes, over the %d byte limit", path, info.Size(), fsMaxRead))
@@ -137,14 +160,6 @@ func toLines(n float64) int {
 }
 
 // isWithin reports whether target equals root or stays under it.
-func isWithin(target, root string) bool {
-	if target == root {
-		return true
-	}
-	return strings.HasPrefix(target, root+string(os.PathSeparator))
-}
-
-// overwriteOK reports whether args carry an explicit overwrite: true.
 func overwriteOK(args map[string]any) bool {
 	v, ok := args["overwrite"]
 	if !ok {
@@ -193,6 +208,10 @@ func writeBackup(src, dst string) error {
 		return err
 	}
 	defer in.Close()
+	return writeBackupFrom(in, dst)
+}
+
+func writeBackupFrom(in io.Reader, dst string) error {
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
@@ -216,7 +235,8 @@ func writeBackup(src, dst string) error {
 // refuseRoot rejects an already-resolved path that is exactly one of the
 // configured allowed roots, so delete/move can never remove a root itself.
 func (h *ToolHandlers) refuseRoot(resolved, verb string) *mcp.CallToolResult {
-	if storage.IsAllowedRoot(resolved, h.effectiveRoots()) {
+	if storage.IsAllowedRoot(resolved, h.effectiveRoots()) ||
+		(h.store != nil && storage.IsAllowedRoot(resolved, []string{h.store.BaseDir()})) {
 		return textError(fmt.Sprintf("refusing to %s an allowed root: %s", verb, resolved))
 	}
 	return nil
@@ -225,7 +245,7 @@ func (h *ToolHandlers) refuseRoot(resolved, verb string) *mcp.CallToolResult {
 // ensureWritable refuses to clobber an existing file unless overwrite=true;
 // on overwrite it backs the previous file up to <name>.bak-<timestamp>
 // and audits. Returns the backup path ("" when nothing was backed up).
-func ensureWritable(resolved, action string, args map[string]any) (string, *mcp.CallToolResult) {
+func (h *ToolHandlers) ensureWritable(resolved, action string, args map[string]any) (string, *mcp.CallToolResult) {
 	fi, err := os.Lstat(resolved)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -249,7 +269,7 @@ func ensureWritable(resolved, action string, args map[string]any) (string, *mcp.
 	if err := writeBackup(resolved, bak); err != nil {
 		return "", textError("backup write: " + err.Error())
 	}
-	auditLog(action, resolved, "ok", map[string]any{"backup": bak})
+	h.auditLog(action, resolved, "ok", map[string]any{"backup": bak})
 	return bak, nil
 }
 
@@ -337,7 +357,7 @@ func (h *ToolHandlers) handleWriteText(ctx context.Context, args map[string]any)
 	if errRes := checkWriteSize(len(content)); errRes != nil {
 		return errRes, nil
 	}
-	bak, errRes := ensureWritable(resolved, "write_text", args)
+	bak, errRes := h.ensureWritable(resolved, "write_text", args)
 	if errRes != nil {
 		return errRes, nil
 	}
@@ -394,7 +414,7 @@ func (h *ToolHandlers) handleAppendText(ctx context.Context, args map[string]any
 	if err != nil {
 		return textError("append: " + err.Error()), nil
 	}
-	auditLog("append_text", resolved, "ok", map[string]any{"appended": n})
+	h.auditLog("append_text", resolved, "ok", map[string]any{"appended": n})
 	return jsonResult(map[string]any{"path": path, "appended": n}), nil
 }
 
@@ -439,7 +459,7 @@ func (h *ToolHandlers) handleWriteCSV(ctx context.Context, args map[string]any) 
 	if errRes := checkWriteSize(len(content)); errRes != nil {
 		return errRes, nil
 	}
-	bak, errRes := ensureWritable(resolved, "write_csv", args)
+	bak, errRes := h.ensureWritable(resolved, "write_csv", args)
 	if errRes != nil {
 		return errRes, nil
 	}
@@ -470,7 +490,10 @@ func (h *ToolHandlers) handleListDirectory(ctx context.Context, args map[string]
 		if e.Type()&fs.ModeSymlink != 0 {
 			continue
 		}
-		info, _ := e.Info()
+		info, err := e.Info()
+		if err != nil {
+			return textError("list entry: " + err.Error()), nil
+		}
 		files = append(files, map[string]any{
 			"name": e.Name(), "dir": e.IsDir(),
 			"size": info.Size(), "modified": info.ModTime().Format(time.RFC3339),
@@ -524,7 +547,7 @@ func (h *ToolHandlers) handleCopyFile(ctx context.Context, args map[string]any) 
 	if err != nil {
 		return textError("read source: " + err.Error()), nil
 	}
-	bak, errRes := ensureWritable(resolvedDst, "copy_file", args)
+	bak, errRes := h.ensureWritable(resolvedDst, "copy_file", args)
 	if errRes != nil {
 		return errRes, nil
 	}
@@ -560,7 +583,7 @@ func (h *ToolHandlers) handleMoveFile(ctx context.Context, args map[string]any) 
 	if errRes := h.refuseRoot(resolvedDst, "move"); errRes != nil {
 		return errRes, nil
 	}
-	bak, errRes := ensureWritable(resolvedDst, "move_file", args)
+	bak, errRes := h.ensureWritable(resolvedDst, "move_file", args)
 	if errRes != nil {
 		return errRes, nil
 	}
@@ -588,7 +611,7 @@ func (h *ToolHandlers) handleDeleteFile(ctx context.Context, args map[string]any
 	fi, err := os.Lstat(resolved)
 	if err != nil {
 		if os.IsNotExist(err) {
-			auditLog("delete_file", resolved, "ok", map[string]any{"note": "already absent"})
+			h.auditLog("delete_file", resolved, "ok", map[string]any{"note": "already absent"})
 			return jsonResult(map[string]any{"deleted": path}), nil
 		}
 		return textError("stat failed: " + err.Error()), nil
@@ -596,12 +619,12 @@ func (h *ToolHandlers) handleDeleteFile(ctx context.Context, args map[string]any
 	if fi.IsDir() && !recursiveOK(args) {
 		return textError(fmt.Sprintf("refusing to delete directory without recursive=true: %s", path)), nil
 	}
-	auditLog("delete_file", resolved, "attempt", map[string]any{"recursive": recursiveOK(args)})
+	h.auditLog("delete_file", resolved, "attempt", map[string]any{"recursive": recursiveOK(args)})
 	if err := os.RemoveAll(resolved); err != nil {
-		auditLog("delete_file", resolved, "error", map[string]any{"error": err.Error()})
+		h.auditLog("delete_file", resolved, "error", map[string]any{"error": err.Error()})
 		return textError("delete failed: " + err.Error()), nil
 	}
-	auditLog("delete_file", resolved, "ok", map[string]any{"recursive": recursiveOK(args)})
+	h.auditLog("delete_file", resolved, "ok", map[string]any{"recursive": recursiveOK(args)})
 	return jsonResult(map[string]any{"deleted": path}), nil
 }
 
@@ -650,7 +673,7 @@ func (h *ToolHandlers) handleFindFiles(ctx context.Context, args map[string]any)
 		return textError(err.Error()), nil
 	}
 	if skipped > 0 {
-		auditLog("find_files", resolved, "ok", map[string]any{"skipped_symlinks": skipped})
+		h.auditLog("find_files", resolved, "ok", map[string]any{"skipped_symlinks": skipped})
 	}
 	return jsonResult(matches), nil
 }
@@ -696,7 +719,7 @@ func (h *ToolHandlers) handleWriteJSON(ctx context.Context, args map[string]any)
 	if errRes := checkWriteSize(len(pretty)); errRes != nil {
 		return errRes, nil
 	}
-	bak, errRes := ensureWritable(resolved, "write_json", args)
+	bak, errRes := h.ensureWritable(resolved, "write_json", args)
 	if errRes != nil {
 		return errRes, nil
 	}
@@ -718,7 +741,18 @@ func (h *ToolHandlers) handleCreateZip(ctx context.Context, args map[string]any)
 	if len(sourcesRaw) > fsMaxSrcs {
 		return textError(fmt.Sprintf("too many sources: %d over the %d limit", len(sourcesRaw), fsMaxSrcs)), nil
 	}
-	sources := toStrSlice(sourcesRaw)
+	sources := make([]string, 0, len(sourcesRaw))
+	for _, arg := range sourcesRaw {
+		src, ok := arg.(string)
+		if !ok || src == "" {
+			return textError("sources must contain non-empty paths"), nil
+		}
+		resolved, errRes := h.resolveRead(src)
+		if errRes != nil {
+			return errRes, nil
+		}
+		sources = append(sources, resolved)
+	}
 	seen := make(map[string]string, len(sources))
 	for _, src := range sources {
 		base := filepath.Base(src)
@@ -731,22 +765,22 @@ func (h *ToolHandlers) handleCreateZip(ctx context.Context, args map[string]any)
 	if errRes != nil {
 		return errRes, nil
 	}
-	bak, errRes := ensureWritable(resolved, "create_zip", args)
+	bak, errRes := h.ensureWritable(resolved, "create_zip", args)
 	if errRes != nil {
 		return errRes, nil
 	}
 	if errRes := mkdirParent(resolved); errRes != nil {
 		return errRes, nil
 	}
-	f, err := os.Create(resolved)
+	f, err := os.CreateTemp(filepath.Dir(resolved), ".mcp-zip-*")
 	if err != nil {
 		return textError("create zip: " + err.Error()), nil
 	}
+	defer os.Remove(f.Name())
 	w := zip.NewWriter(f)
 	fail := func(format string, a ...any) (*mcp.CallToolResult, error) {
 		wCloseErr := w.Close()
 		fCloseErr := f.Close()
-		_ = os.Remove(resolved)
 		msg := fmt.Sprintf(format, a...)
 		if wCloseErr != nil {
 			msg += fmt.Sprintf(" (zip close: %v)", wCloseErr)
@@ -758,17 +792,13 @@ func (h *ToolHandlers) handleCreateZip(ctx context.Context, args map[string]any)
 	}
 	var written int
 	var total int64
-	for _, src := range sources {
-		rsrc, errRes := h.resolveRead(src)
-		if errRes != nil {
-			return fail("source not allowed: %s", src)
-		}
+	for _, rsrc := range sources {
 		if _, errRes := statWithinLimit(rsrc); errRes != nil {
-			return fail("source over limit: %s", src)
+			return fail("cannot read source: %s", rsrc)
 		}
 		data, err := os.ReadFile(rsrc)
 		if err != nil {
-			return fail("read %s: %v", src, err)
+			return fail("read %s: %v", rsrc, err)
 		}
 		total += int64(len(data))
 		if total > fsMaxZipB {
@@ -790,6 +820,14 @@ func (h *ToolHandlers) handleCreateZip(ctx context.Context, args map[string]any)
 	if err := f.Close(); err != nil {
 		return textError(fmt.Sprintf("close zip file: %v", err)), nil
 	}
+	if overwriteOK(args) {
+		err = os.Rename(f.Name(), resolved)
+	} else {
+		err = os.Link(f.Name(), resolved)
+	}
+	if err != nil {
+		return textError("install zip: " + err.Error()), nil
+	}
 	return jsonResult(map[string]any{"path": path, "files": written, "sources": len(sources), "backup": bak}), nil
 }
 
@@ -810,111 +848,157 @@ func (h *ToolHandlers) handleExtractZip(ctx context.Context, args map[string]any
 	if errRes != nil {
 		return errRes, nil
 	}
-	if fi, err := os.Lstat(absDest); err == nil && !fi.IsDir() {
-		return textError(fmt.Sprintf("dest exists and is not a directory: %s (pass overwrite=true to replace it)", dest)), nil
-	}
-	// A symlinked dest is already refused by resolveDest; an existing file
-	// dest still needs the overwrite flag.
-	if _, err := os.Lstat(absDest); err == nil {
+	if fi, err := os.Lstat(absDest); err == nil {
+		if !fi.IsDir() {
+			return textError("destination must be a directory"), nil
+		}
 		if !overwriteOK(args) {
 			return textError(fmt.Sprintf("dest exists: %s (pass overwrite=true)", dest)), nil
 		}
+	} else if !os.IsNotExist(err) {
+		return textError("stat destination: " + err.Error()), nil
 	}
 	r, err := zip.OpenReader(resolvedZip)
 	if err != nil {
 		return textError("open zip: " + err.Error()), nil
 	}
 	defer r.Close()
-	if err := os.MkdirAll(absDest, 0755); err != nil {
-		return textError(fmt.Sprintf("mkdir %s: %v", absDest, err)), nil
+	if len(r.File) > fsMaxZip {
+		return textError(fmt.Sprintf("zip holds more than %d files or directories: refusing to extract", fsMaxZip)), nil
 	}
-	var extracted []string
-	var totalBytes int64
-	var fileCount int
-	for _, f := range r.File {
-		name := f.Name
-		if name == "" || name == "." || name == "/" {
-			continue
+	names := make([]string, len(r.File))
+	seen := make(map[string]bool)
+	directories := make(map[string]bool)
+	var declared uint64
+	for i, entry := range r.File {
+		name := strings.TrimSuffix(entry.Name, "/")
+		if strings.HasPrefix(name, "/") {
+			return textError(fmt.Sprintf("absolute path blocked: %s", entry.Name)), nil
 		}
-		if strings.HasPrefix(name, "/") || filepath.IsAbs(name) {
-			return textError(fmt.Sprintf("absolute path blocked: %s", name)), nil
+		rel, err := filepath.Localize(name)
+		if err != nil || rel == "." || strings.ContainsAny(name, "\\:") {
+			return textError(fmt.Sprintf("invalid zip path or traversal blocked: %s", entry.Name)), nil
 		}
-		blocked := false
-		for _, seg := range strings.Split(filepath.ToSlash(name), "/") {
-			if seg == ".." {
-				blocked = true
-				break
-			}
+		mode := entry.Mode()
+		if !mode.IsRegular() && !mode.IsDir() {
+			return textError(fmt.Sprintf("symlink entry blocked or non-regular zip entry: %s", entry.Name)), nil
 		}
-		if blocked {
-			return textError(fmt.Sprintf("path traversal blocked: %s", name)), nil
+		if seen[rel] {
+			return textError(fmt.Sprintf("duplicate zip entry: %s", entry.Name)), nil
 		}
-		if f.FileInfo().Mode()&fs.ModeSymlink != 0 {
-			return textError(fmt.Sprintf("symlink entry blocked: %s", name)), nil
-		}
-		target := filepath.Join(absDest, filepath.Clean("/"+name))
-		if !isWithin(target, absDest) {
-			return textError(fmt.Sprintf("path traversal blocked: %s", name)), nil
-		}
-		if f.FileInfo().IsDir() {
-			if fi, err := os.Lstat(target); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-				return textError(fmt.Sprintf("refusing to follow symlink: %s", target)), nil
-			}
-			if err := os.MkdirAll(target, 0755); err != nil {
-				return textError(fmt.Sprintf("mkdir %s: %v", target, err)), nil
-			}
-			continue
-		}
-		fileCount++
-		if fileCount > fsMaxZip {
-			return textError(fmt.Sprintf("zip holds more than %d files: refusing to extract", fsMaxZip)), nil
-		}
-		parent := filepath.Dir(target)
-		if err := os.MkdirAll(parent, 0755); err != nil {
-			return textError(fmt.Sprintf("mkdir %s: %v", parent, err)), nil
-		}
-		// Re-resolve the parent: a pre-existing symlink subdir must not
-		// redirect the write outside dest.
-		if realParent, err := filepath.EvalSymlinks(parent); err != nil || !isWithin(realParent, absDest) {
-			return textError(fmt.Sprintf("symlink escape blocked: %s", name)), nil
-		}
-		if fi, err := os.Lstat(target); err == nil {
-			if fi.Mode()&os.ModeSymlink != 0 {
-				return textError(fmt.Sprintf("refusing to follow symlink: %s", target)), nil
-			}
-			if !overwriteOK(args) {
-				return textError(fmt.Sprintf("file exists: %s (pass overwrite=true)", target)), nil
-			}
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return textError(fmt.Sprintf("open %s: %v", name, err)), nil
-		}
-		out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
-		if err != nil {
-			rc.Close()
-			return textError(fmt.Sprintf("create %s: %v", target, err)), nil
-		}
-		// Cap this entry so the running total never exceeds the budget.
-		n, err := io.Copy(out, io.LimitReader(rc, fsMaxZipB-totalBytes+1))
-		cerr := rc.Close()
-		werr := out.Close()
-		if err != nil {
-			return textError(fmt.Sprintf("write %s: %v", target, err)), nil
-		}
-		if cerr != nil {
-			return textError(fmt.Sprintf("close %s: %v", name, cerr)), nil
-		}
-		if werr != nil {
-			return textError(fmt.Sprintf("close %s: %v", target, werr)), nil
-		}
-		totalBytes += n
-		if totalBytes > fsMaxZipB {
+		seen[rel] = true
+		directories[rel] = mode.IsDir()
+		names[i] = rel
+		if entry.UncompressedSize64 > uint64(fsMaxZipB)-declared {
 			return textError(fmt.Sprintf("zip extracts more than %d bytes total: refusing to extract", fsMaxZipB)), nil
 		}
+		declared += entry.UncompressedSize64
+	}
+	// Detecta conflictos del paquete y del destino antes de instalar la primera entrada.
+	for _, rel := range names {
+		for parent := filepath.Dir(rel); parent != "."; parent = filepath.Dir(parent) {
+			if seen[parent] && !directories[parent] {
+				return textError("zip entry conflicts with parent file: " + rel), nil
+			}
+		}
+		target := filepath.Join(absDest, rel)
+		canonical, err := storage.ResolveDest(target, []string{absDest})
+		if err != nil {
+			return textError("extract destination: " + err.Error()), nil
+		}
+		if h.isStorageControlFile(canonical) {
+			return textError("refusing to extract over a storage control file"), nil
+		}
+		if err := storage.CheckDesktopWrite(canonical); err != nil {
+			return textError(err.Error()), nil
+		}
+		info, err := os.Lstat(canonical)
+		if err == nil && (info.IsDir() != directories[rel] || !info.IsDir() && !info.Mode().IsRegular()) {
+			return textError("zip destination has incompatible type: " + rel), nil
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return textError("stat zip destination: " + err.Error()), nil
+		}
+	}
+	if err := os.MkdirAll(absDest, 0755); err != nil {
+		return textError("create destination: " + err.Error()), nil
+	}
+	root, err := os.OpenRoot(absDest)
+	if err != nil {
+		return textError("open destination: " + err.Error()), nil
+	}
+	defer root.Close()
+
+	extracted := make([]string, 0, len(r.File))
+	var total int64
+	for i, entry := range r.File {
+		if err := ctx.Err(); err != nil {
+			return textError(err.Error()), nil
+		}
+		rel := names[i]
+		target := filepath.Join(absDest, rel)
+		canonical, resolveErr := storage.ResolveDest(target, []string{absDest})
+		if resolveErr != nil {
+			return textError("extract destination: " + resolveErr.Error()), nil
+		}
+		if h.isStorageControlFile(canonical) {
+			return textError("refusing to extract over a storage control file"), nil
+		}
+		if err := storage.CheckDesktopWrite(canonical); err != nil {
+			return textError(err.Error()), nil
+		}
+		if entry.FileInfo().IsDir() {
+			if err := root.MkdirAll(rel, 0755); err != nil {
+				return textError("create zip directory: " + err.Error()), nil
+			}
+			continue
+		}
+		if err := root.MkdirAll(filepath.Dir(rel), 0755); err != nil {
+			return textError("create zip parent: " + err.Error()), nil
+		}
+		n, err := extractZipFile(root, rel, entry, fsMaxZipB-total, overwriteOK(args))
+		if err != nil {
+			return textError(fmt.Sprintf("extract %s: %v", entry.Name, err)), nil
+		}
+		total += n
 		extracted = append(extracted, target)
 	}
 	return jsonResult(map[string]any{"dest": dest, "extracted": len(extracted), "files": extracted}), nil
+}
+
+// extractZipFile verifica la integridad antes de instalar el archivo final.
+func extractZipFile(root *os.Root, name string, entry *zip.File, remaining int64, overwrite bool) (int64, error) {
+	rc, err := entry.Open()
+	if err != nil {
+		return 0, err
+	}
+	defer rc.Close()
+	id, err := newTxID()
+	if err != nil {
+		return 0, err
+	}
+	tempName := filepath.Join(filepath.Dir(name), ".mcp-zip-"+id)
+	out, err := root.OpenFile(tempName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if err != nil {
+		return 0, err
+	}
+	defer root.Remove(tempName)
+	n, copyErr := io.Copy(out, io.LimitReader(rc, remaining+1))
+	if err := errors.Join(copyErr, out.Close()); err != nil {
+		return 0, err
+	}
+	if n > remaining {
+		return 0, fmt.Errorf("zip exceeds uncompressed size limit")
+	}
+	if !overwrite {
+		return n, root.Link(tempName, name)
+	}
+	if fi, err := root.Lstat(name); err == nil && !fi.Mode().IsRegular() {
+		return 0, fmt.Errorf("refusing to replace non-regular file")
+	} else if err != nil && !os.IsNotExist(err) {
+		return 0, err
+	}
+	return n, root.Rename(tempName, name)
 }
 
 func (h *ToolHandlers) handleFileExists(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
@@ -1074,7 +1158,7 @@ func (h *ToolHandlers) handleTreeDirectory(ctx context.Context, args map[string]
 		return textError(err.Error()), nil
 	}
 	if skipped > 0 {
-		auditLog("tree_directory", resolved, "ok", map[string]any{"skipped_symlinks": skipped})
+		h.auditLog("tree_directory", resolved, "ok", map[string]any{"skipped_symlinks": skipped})
 	}
 	return jsonResult(tree), nil
 }
@@ -1159,7 +1243,7 @@ func (h *ToolHandlers) handleJSONtoCSV(ctx context.Context, args map[string]any)
 	if errRes := checkWriteSize(len(csvContent)); errRes != nil {
 		return errRes, nil
 	}
-	bak, errRes := ensureWritable(csvPath, "json_to_csv", args)
+	bak, errRes := h.ensureWritable(csvPath, "json_to_csv", args)
 	if errRes != nil {
 		return errRes, nil
 	}
@@ -1269,7 +1353,7 @@ func (h *ToolHandlers) handleWriteMarkdown(ctx context.Context, args map[string]
 	if errRes := checkWriteSize(len(content)); errRes != nil {
 		return errRes, nil
 	}
-	bak, errRes := ensureWritable(resolved, "write_markdown", args)
+	bak, errRes := h.ensureWritable(resolved, "write_markdown", args)
 	if errRes != nil {
 		return errRes, nil
 	}

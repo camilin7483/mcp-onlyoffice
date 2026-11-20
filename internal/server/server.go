@@ -67,7 +67,7 @@ func New(ctx context.Context, cfg *config.Config) (*MCPOnlyOffice, error) {
 	// resolver only warns, per plugin.ResolvePluginDir.
 	if dir, err := plugin.ResolvePluginDir(cfg.PluginDir); err != nil {
 		slog.Warn("plugin dir unresolved, continuing without plugin install", "error", err)
-	} else if err := plugin.InstallPluginFilesTo(dir); err != nil {
+	} else if err := plugin.InstallPluginFilesForDesktop(dir, desktopPath, cfg.PluginPort); err != nil {
 		slog.Warn("plugin install failed, continuing without plugin", "dir", dir, "error", err)
 	} else {
 		slog.Info("plugin installed", "dir", dir)
@@ -152,6 +152,7 @@ func New(ctx context.Context, cfg *config.Config) (*MCPOnlyOffice, error) {
 func (s *MCPOnlyOffice) Run() error {
 	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
+	defer s.bridge.Stop()
 
 	go func() {
 		if err := s.bridge.Start(); err != nil {
@@ -193,6 +194,7 @@ func (s *MCPOnlyOffice) Run() error {
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Stop(sigCh)
 		select {
 		case <-sigCh:
 			slog.Info("shutting down...")
@@ -233,8 +235,30 @@ func (s *MCPOnlyOffice) addToolToServer(server *mcp.Server, t toolDef) {
 		} else {
 			args = make(map[string]any)
 		}
+		if writesFilesystem(t.Name) {
+			unlock, err := storage.LockToolWrites(ctx, s.store.BaseDir())
+			if err != nil {
+				return textError(err.Error()), nil
+			}
+			defer unlock()
+		}
 		return t.Handler(ctx, args)
 	})
+}
+
+// writesFilesystem identifica las herramientas que pueden escribir rutas compartidas.
+func writesFilesystem(name string) bool {
+	switch name {
+	case "document_operation", "write_document", "export_document", "write_text",
+		"append_text", "write_docx", "write_table_docx", "write_spreadsheet",
+		"write_presentation", "write_csv", "create_directory", "copy_file", "move_file",
+		"delete_file", "write_json", "create_zip", "extract_zip", "json_to_csv",
+		"touch_file", "write_markdown", "document_agent", "run_workflow",
+		"render_template", "python_engine", "create_report", "builder_render":
+		return true
+	default:
+		return false
+	}
 }
 
 func isEssential(name string) bool {

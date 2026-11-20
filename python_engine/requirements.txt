@@ -16,8 +16,8 @@ matplotlib==3.11.0
 numpy==2.5.2
 
 # PDF
-fpdf2==2.7.0
-PyPDF2==3.0.0
+fpdf2==2.8.9
+pypdf==7.1.1
 
 # Images
 Pillow==13.0.0

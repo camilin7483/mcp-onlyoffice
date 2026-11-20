@@ -35,16 +35,37 @@ func (h *ToolHandlers) handleOpen(ctx context.Context, args map[string]any) (*mc
 	if h.desktopPath == "" {
 		return textError("Desktop Editors not found. Install it or configure the path."), nil
 	}
+	if err := ctx.Err(); err != nil {
+		return textError(err.Error()), nil
+	}
+	existing := make(map[string]bool)
+	for _, session := range h.bridge.Sessions() {
+		existing[session.ID] = true
+	}
 	if err := h.openInEditor(id, mode); err != nil {
 		return textError("open failed: " + err.Error()), nil
 	}
-	for i := 0; i < 30; i++ {
-		if h.bridge.IsConnected() {
-			return jsonResult(map[string]any{"opened": id, "mode": mode, "plugin": "connected"}), nil
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(15 * time.Second)
+	defer deadline.Stop()
+	for {
+		for _, session := range h.bridge.Sessions() {
+			if !existing[session.ID] {
+				return jsonResult(map[string]any{"opened": id, "mode": mode, "plugin": "connected", "document_binding": "unverified"}), nil
+			}
 		}
-		time.Sleep(500 * time.Millisecond)
+		if len(existing) != 0 {
+			return jsonResult(map[string]any{"opened": id, "mode": mode, "plugin": "waiting", "document_binding": "unverified"}), nil
+		}
+		select {
+		case <-ctx.Done():
+			return textError("editor launched; waiting for plugin canceled: " + ctx.Err().Error()), nil
+		case <-deadline.C:
+			return jsonResult(map[string]any{"opened": id, "mode": mode, "plugin": "waiting", "document_binding": "unverified"}), nil
+		case <-ticker.C:
+		}
 	}
-	return jsonResult(map[string]any{"opened": id, "mode": mode, "plugin": "waiting"}), nil
 }
 
 func (h *ToolHandlers) handleGetSelectedText(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {

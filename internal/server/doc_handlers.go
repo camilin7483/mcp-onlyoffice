@@ -15,9 +15,9 @@ import (
 // prepareWrite resolves a document output path against the allowed roots and
 // applies the same overwrite/backup policy as the generic filesystem tools.
 func (h *ToolHandlers) prepareWrite(path string, overwrite bool) (string, *mcp.CallToolResult) {
-	resolved, err := storage.ResolveDest(path, h.effectiveRoots())
-	if err != nil {
-		return "", textError(err.Error())
+	resolved, pathError := h.resolveDest(path)
+	if pathError != nil {
+		return "", pathError
 	}
 	if fi, statErr := os.Lstat(resolved); statErr == nil {
 		if fi.Mode()&os.ModeSymlink != 0 {

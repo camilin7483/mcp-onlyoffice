@@ -43,3 +43,27 @@ class ReportImageTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_mail_merge_checks_all_destinations_before_writing(tmp_path):
+    from docx import Document
+    import pytest
+
+    template = tmp_path / "template.docx"
+    doc = Document()
+    doc.add_paragraph("Hello {{name}}")
+    doc.save(template)
+    out_dir = tmp_path / "merged"
+    out_dir.mkdir()
+    existing = out_dir / "doc_2.docx"
+    existing.write_bytes(b"existing document")
+    rows = [{"name": "Alice"}, {"name": "Bob"}]
+    engine = DocumentEngine()
+
+    with pytest.raises(ValueError, match="already exists"):
+        engine.mail_merge(str(template), str(out_dir), rows=rows)
+
+    assert not (out_dir / "doc_1.docx").exists()
+    assert existing.read_bytes() == b"existing document"
+    result = engine.mail_merge(str(template), str(out_dir), rows=rows[:1])
+    assert Document(result["files"][0]).paragraphs[0].text == "Hello Alice"

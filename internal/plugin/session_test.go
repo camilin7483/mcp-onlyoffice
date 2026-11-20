@@ -413,3 +413,16 @@ func TestSessionCapEnforced(t *testing.T) {
 		t.Fatalf("sessions = %d, want %d", n, MaxSessions)
 	}
 }
+
+func TestSendCommandRequiresUnambiguousDesktopSession(t *testing.T) {
+	b, _ := testBridge(t)
+	srv := serveBridge(t, b)
+	word, _ := helloConnect(t, srv, b, "word-instance", "word", wordCaps(), version.BridgeProtocol)
+	defer word.CloseNow()
+	cell, _ := helloConnect(t, srv, b, "cell-instance", "cell", []string{"writer.insert_text"}, version.BridgeProtocol)
+	defer cell.CloseNow()
+	_, err := b.SendCommand(context.Background(), "insert_text", map[string]any{"text": "draft"}, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "multiple Desktop") {
+		t.Fatalf("insert_text with multiple sessions: %v", err)
+	}
+}

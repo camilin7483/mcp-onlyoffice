@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -36,11 +37,8 @@ func TestPluginHTMLNoFullDocumentPaste(t *testing.T) {
 			t.Errorf("embedded page must not paste the whole document (found %q)", bad)
 		}
 	}
-	// Full-content reads feed get_all_content and the before/after match check;
-	// they never feed PasteText.
-	if strings.Count(html, "GetAllContent") != 3 {
-		t.Errorf("GetAllContent appears %d times, want 3 (get + replace before/after)",
-			strings.Count(html, "GetAllContent"))
+	if !strings.Contains(html, "GetAllParagraphs") || !strings.Contains(html, "callCommand(fn,") {
+		t.Error("paragraph reads must call the editor API with a function")
 	}
 	if !strings.Contains(html, "matches") {
 		t.Error("replace_text must report a match count")
@@ -51,6 +49,9 @@ func TestPluginHTMLNoFullDocumentPaste(t *testing.T) {
 }
 
 func TestManifestVersionAndGUID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("default plugin directory is Linux-only")
+	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	if err := InstallPluginFiles(); err != nil {
@@ -85,5 +86,32 @@ func TestPluginConfigVersion(t *testing.T) {
 	}
 	if cfg["version"] != version.Version {
 		t.Fatalf("version = %v, want %s", cfg["version"], version.Version)
+	}
+}
+
+func TestPluginInstallerUsesLocalSDKAndConfiguredPort(t *testing.T) {
+	base := t.TempDir()
+	editor := filepath.Join(base, "DesktopEditors")
+	if err := os.WriteFile(editor, nil, 0700); err != nil {
+		t.Fatal(err)
+	}
+	sdkRoot := filepath.Join(base, "editors", "sdkjs-plugins", "v1")
+	if err := os.MkdirAll(sdkRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sdkRoot, "plugins.js"), []byte("// SDK fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	pluginDir := filepath.Join(base, "plugin")
+	if err := InstallPluginFilesForDesktop(pluginDir, editor, 28501); err != nil {
+		t.Fatal(err)
+	}
+	page, err := os.ReadFile(filepath.Join(pluginDir, "index.html"))
+	if err != nil || !strings.Contains(string(page), `src="./plugins.js"`) || !strings.Contains(string(page), "PORT_START = 28501") {
+		t.Fatalf("generated page did not use the local SDK and configured port: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(pluginDir, "plugins.js"))
+	if err != nil || string(data) != "// SDK fixture" {
+		t.Fatalf("installed SDK = %q, %v", data, err)
 	}
 }

@@ -1,19 +1,20 @@
 package storage
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
-	"sync"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
 
 type LocalStore struct {
-	mu     sync.RWMutex
 	base   string
 	metaFn string
 }
@@ -31,6 +32,10 @@ func NewLocalStore(base string) (*LocalStore, error) {
 		return nil, fmt.Errorf("create storage dir: %w", err)
 	}
 
+	abs, err = filepath.EvalSymlinks(abs)
+	if err != nil {
+		return nil, fmt.Errorf("resolve storage root: %w", err)
+	}
 	s := &LocalStore{
 		base:   abs,
 		metaFn: filepath.Join(abs, ".metadata.json"),
@@ -47,10 +52,18 @@ type metaEntry struct {
 	CreatedAt  time.Time `json:"created_at"`
 	ModifiedAt time.Time `json:"modified_at"`
 	Refs       []string  `json:"refs,omitempty"`
+	BlobExt    string    `json:"blob_ext,omitempty"`
 }
 
-func (s *LocalStore) dataPath(id string) string {
-	return filepath.Join(s.base, id+".data")
+func (s *LocalStore) dataPath(entry metaEntry) string {
+	legacy := filepath.Join(s.base, entry.ID+".data")
+	if entry.BlobExt != "" {
+		path := filepath.Join(s.base, entry.ID+entry.BlobExt)
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			return path
+		}
+	}
+	return legacy
 }
 
 // BaseDir returns the absolute storage root (used to sandbox zip extraction).
@@ -63,15 +76,29 @@ func (s *LocalStore) saveMeta(entries map[string]metaEntry) error {
 	if err != nil {
 		return fmt.Errorf("marshal metadata: %w", err)
 	}
-	if err := os.WriteFile(s.metaFn, data, 0644); err != nil {
+	tmp, err := os.CreateTemp(s.base, ".metadata-*")
+	if err != nil {
+		return fmt.Errorf("stage metadata: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+	_, writeErr := tmp.Write(data)
+	syncErr := tmp.Sync()
+	closeErr := tmp.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
 		return fmt.Errorf("write metadata: %w", err)
+	}
+	if err := replacePath(tmp.Name(), s.metaFn); err != nil {
+		return fmt.Errorf("replace metadata: %w", err)
 	}
 	return nil
 }
 
 func (s *LocalStore) Create(filename string, data []byte) (*Document, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := LockDirectory(context.Background(), s.base)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	if len(data) > MaxDocBytes {
 		return nil, fmt.Errorf("document payload %d bytes exceeds %d byte limit", len(data), MaxDocBytes)
@@ -93,21 +120,31 @@ func (s *LocalStore) Create(filename string, data []byte) (*Document, error) {
 		ModifiedAt: now,
 	}
 
-	if err := os.WriteFile(s.dataPath(id), data, 0644); err != nil {
-		return nil, fmt.Errorf("write file: %w", err)
+	path := s.dataPath(entry)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("create payload: %w", err)
+	}
+	_, writeErr := file.Write(data)
+	syncErr := file.Sync()
+	if err := errors.Join(writeErr, syncErr, file.Close()); err != nil {
+		return nil, fmt.Errorf("write payload: %w", errors.Join(err, os.Remove(path)))
 	}
 
 	entries[id] = entry
 	if err := s.saveMeta(entries); err != nil {
-		return nil, err
+		return nil, errors.Join(err, os.Remove(s.dataPath(entry)))
 	}
 
 	return entryToDoc(entry), nil
 }
 
 func (s *LocalStore) Get(id string) (*Document, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	unlock, err := LockDirectory(context.Background(), s.base)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	entries, err := s.readEntries()
 	if err != nil {
@@ -119,23 +156,27 @@ func (s *LocalStore) Get(id string) (*Document, error) {
 		return nil, ErrNotFound
 	}
 
-	return entryToDoc(entry), nil
+	return s.currentDocument(entry), nil
 }
 
 func (s *LocalStore) GetData(id string) ([]byte, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	unlock, err := LockDirectory(context.Background(), s.base)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	entries, err := s.readEntries()
 	if err != nil {
 		return nil, err
 	}
 
-	if _, ok := entries[id]; !ok {
+	entry, ok := entries[id]
+	if !ok {
 		return nil, ErrNotFound
 	}
 
-	data, err := os.ReadFile(s.dataPath(id))
+	data, err := os.ReadFile(s.dataPath(entry))
 	if err != nil {
 		return nil, fmt.Errorf("read file data: %w", err)
 	}
@@ -144,8 +185,11 @@ func (s *LocalStore) GetData(id string) ([]byte, error) {
 }
 
 func (s *LocalStore) List() ([]Document, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	unlock, err := LockDirectory(context.Background(), s.base)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	entries, err := s.readEntries()
 	if err != nil {
@@ -154,7 +198,7 @@ func (s *LocalStore) List() ([]Document, error) {
 
 	docs := make([]Document, 0, len(entries))
 	for _, e := range entries {
-		docs = append(docs, *entryToDoc(e))
+		docs = append(docs, *s.currentDocument(e))
 	}
 
 	sort.Slice(docs, func(i, j int) bool {
@@ -165,39 +209,133 @@ func (s *LocalStore) List() ([]Document, error) {
 }
 
 func (s *LocalStore) Delete(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := LockDirectory(context.Background(), s.base)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	entries, err := s.readEntries()
 	if err != nil {
 		return err
 	}
 
-	if _, ok := entries[id]; !ok {
+	entry, ok := entries[id]
+	if !ok {
 		return ErrNotFound
 	}
 
-	if err := os.Remove(s.dataPath(id)); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove data file: %w", err)
+	path := s.dataPath(entry)
+	if err := CheckDesktopWrite(path); err != nil {
+		return err
 	}
-	// NOTE: per-document "<id>.meta.json" sidecars were never written
-	// (metadata lives in .metadata.json); the best-effort legacy cleanup
-	// below only matters for stores created by very old versions.
-	if err := os.Remove(filepath.Join(s.base, id+".meta.json")); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove meta file: %w", err)
-	}
+	// Primero se confirma la baja en el índice. Un fallo del índice conserva el archivo.
 	delete(entries, id)
-
-	return s.saveMeta(entries)
+	if err := s.saveMeta(entries); err != nil {
+		return err
+	}
+	if err := syncMetadataDirectory(s.base); err != nil {
+		return fmt.Errorf("index replaced but could not be synced; payload retained at %s: %w", path, err)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("document removed from index; payload retained at %s: %w", path, err)
+	}
+	if err := os.Remove(filepath.Join(s.base, id+".meta.json")); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("document deleted; legacy sidecar retained: %w", err)
+	}
+	return nil
 }
 
-func (s *LocalStore) DataPath(id string) string {
-	return s.dataPath(id)
+// DesktopPath conserva un solo archivo editable con la extensión que reconoce el editor.
+func (s *LocalStore) DesktopPath(id string) (string, error) {
+	unlock, err := LockDirectory(context.Background(), s.base)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	entries, err := s.readEntries()
+	if err != nil {
+		return "", err
+	}
+	entry, ok := entries[id]
+	if !ok {
+		return "", ErrNotFound
+	}
+	current := s.dataPath(entry)
+	info, err := os.Lstat(current)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("document file is not a regular file")
+	}
+	ext := entry.BlobExt
+	if ext == "" {
+		ext = strings.ToLower(filepath.Ext(entry.Filename))
+		if !desktopExtension(ext) {
+			return "", fmt.Errorf("unsupported Desktop document extension %q", ext)
+		}
+		dest := filepath.Join(s.base, id+ext)
+		if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+			return "", fmt.Errorf("cannot reserve Desktop document path %q", dest)
+		}
+		// Si se interrumpe la migración, dataPath sigue leyendo el archivo original.
+		entry.BlobExt = ext
+		entries[id] = entry
+		if err := s.saveMeta(entries); err != nil {
+			return "", err
+		}
+	}
+	dest := filepath.Join(s.base, id+ext)
+	if current != dest {
+		if err := os.Rename(current, dest); err != nil {
+			return "", fmt.Errorf("move document to Desktop path: %w", err)
+		}
+	}
+	return dest, nil
+}
+
+func desktopExtension(ext string) bool {
+	switch ext {
+	case ".docx", ".xlsx", ".pptx", ".pdf", ".doc", ".xls", ".ppt", ".txt", ".csv", ".odt", ".ods", ".odp", ".rtf", ".docm", ".xlsm", ".pptm":
+		return true
+	default:
+		return false
+	}
+}
+
+// Rename changes only the document metadata, preserving its ID and references.
+func (s *LocalStore) Rename(id, filename string) (*Document, error) {
+	unlock, err := LockDirectory(context.Background(), s.base)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
+	entries, err := s.readEntries()
+	if err != nil {
+		return nil, err
+	}
+	entry, ok := entries[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	entry.Filename = filename
+	entry.MimeType = mimeType(filename)
+	entry.ModifiedAt = time.Now()
+	entries[id] = entry
+	if err := s.saveMeta(entries); err != nil {
+		return nil, err
+	}
+	return s.currentDocument(entry), nil
 }
 
 func (s *LocalStore) Update(id string, data []byte) (*Document, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := LockDirectory(context.Background(), s.base)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	entries, err := s.readEntries()
 	if err != nil {
@@ -212,19 +350,20 @@ func (s *LocalStore) Update(id string, data []byte) (*Document, error) {
 	if len(data) > MaxDocBytes {
 		return nil, fmt.Errorf("document payload %d bytes exceeds %d byte limit", len(data), MaxDocBytes)
 	}
-	entry.Size = int64(len(data))
-	entry.ModifiedAt = time.Now()
-
-	if err := os.WriteFile(s.dataPath(id), data, 0644); err != nil {
-		return nil, fmt.Errorf("write file: %w", err)
-	}
-
-	entries[id] = entry
-	if err := s.saveMeta(entries); err != nil {
+	path := s.dataPath(entry)
+	info, err := os.Lstat(path)
+	if err != nil {
 		return nil, err
 	}
-
-	return entryToDoc(entry), nil
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("document file is not a regular file")
+	}
+	if err := ReplaceFile(path, data, info.Mode().Perm(), func() error {
+		return CheckDesktopWrite(path)
+	}); err != nil {
+		return nil, fmt.Errorf("replace document: %w", err)
+	}
+	return s.currentDocument(entry), nil
 }
 
 func (s *LocalStore) readEntries() (map[string]metaEntry, error) {
@@ -241,6 +380,15 @@ func (s *LocalStore) readEntries() (map[string]metaEntry, error) {
 		return nil, fmt.Errorf("parse metadata: %w", err)
 	}
 
+	for id, entry := range entries {
+		parsed, err := uuid.Parse(id)
+		if err != nil || parsed.String() != id || entry.ID != id {
+			return nil, fmt.Errorf("metadata contains an invalid document ID")
+		}
+		if entry.BlobExt != "" && !desktopExtension(entry.BlobExt) {
+			return nil, fmt.Errorf("metadata contains an invalid document extension")
+		}
+	}
 	if entries == nil {
 		entries = make(map[string]metaEntry)
 	}
@@ -249,8 +397,11 @@ func (s *LocalStore) readEntries() (map[string]metaEntry, error) {
 }
 
 func (s *LocalStore) AddRef(id, refID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := LockDirectory(context.Background(), s.base)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	entries, err := s.readEntries()
 	if err != nil {
@@ -278,8 +429,11 @@ func (s *LocalStore) AddRef(id, refID string) error {
 }
 
 func (s *LocalStore) GetRefs(id string) ([]string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	unlock, err := LockDirectory(context.Background(), s.base)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	entries, err := s.readEntries()
 	if err != nil {
@@ -295,6 +449,18 @@ func (s *LocalStore) GetRefs(id string) ([]string, error) {
 		return []string{}, nil
 	}
 	return entry.Refs, nil
+}
+
+// currentDocument deriva tamaño y fecha de la misma fuente que usa Desktop Editors.
+func (s *LocalStore) currentDocument(entry metaEntry) *Document {
+	doc := entryToDoc(entry)
+	if info, err := os.Stat(s.dataPath(entry)); err == nil {
+		doc.Size = info.Size()
+		if info.ModTime().After(doc.ModifiedAt) {
+			doc.ModifiedAt = info.ModTime()
+		}
+	}
+	return doc
 }
 
 func entryToDoc(e metaEntry) *Document {

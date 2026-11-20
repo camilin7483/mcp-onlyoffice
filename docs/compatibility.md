@@ -1,64 +1,50 @@
-# Compatibility: what runs where, and what was actually tested
+# Compatibility and verification
 
-## MCP revisions
+## MCP
 
-- SDK: `github.com/modelcontextprotocol/go-sdk v1.8.0` (`go.mod`).
-- The server negotiates MCP revision `2026-07-28` while still accepting
-  older clients (see `CHANGELOG.md` 2.1.0; wire notes: `readOnlyHint` /
-  `idempotentHint` always serialized, `-32601` included in stdio errors).
+The server uses `github.com/modelcontextprotocol/go-sdk v1.8.0`. The release
+audit exercised the real stdio transport with a JSON-RPC client, including
+initialization, tool discovery, tool calls and shutdown on EOF. It verified
+the `2025-11-25` handshake and `2026-07-28` request metadata with
+`server/discover`, `tools/list` and `health`. The legacy profile exposed 74
+tools and the professional profile exposed 20. The audit did not run Claude
+Desktop, OpenCode, Cursor or other assistant clients.
 
-## Clients tested
+## ONLYOFFICE Desktop Editors
 
-- Only the go-sdk wiring in this repo was run: `Definitions()` contract
-  tests (`internal/server/tool_contract_test.go` — pins 74 legacy tools),
-  registration in `server.Run` (`internal/server/server.go`), and the stdio
-  shutdown test (`internal/server/shutdown_test.go`), which boots the real
-  server and closes stdin.
-- No Claude / OpenCode / Cursor / desktop MCP client run is recorded in
-  this repository. Any claim of working in a specific assistant is
-  UNVERIFIED here.
+Verified with **9.0.4.50 on Linux/amd64** under an isolated graphical session.
+The installed plugin connected to the configured loopback port and identified
+Word, spreadsheet and presentation sessions. The audit opened a managed DOCX,
+read paragraphs, inserted and replaced text, inserted a table and a numbered
+list, saved in Desktop Editors and verified the resulting document through
+`export_document`. It generated and opened XLSX and PPTX fixtures and confirmed
+that an ambiguous edit was refused with several sessions open.
 
-## ONLYOFFICE versions
+On the first Desktop open of a managed document, the store moves its legacy
+`<id>.data` payload to `<id>.<extension>`. The document keeps its ID. Desktop
+saves and storage exports use the same payload. Older server binaries expect
+the `.data` layout and should not share the migrated store.
 
-- On this machine: ONLYOFFICE **9.0.4.50** (recorded in
-  `benchmark/results/bench-d77900e-20261119T211009Z.json`).
-- 8.x was never tested here. Statements elsewhere suggesting 8.x
-  verification refer to an earlier checkout state and are UNVERIFIED for
-  this tree.
+Legacy tool calls without a session ID require at most one connected editor.
+For typed Desktop edits with several open editors, obtain the target session
+from `list_editor_sessions` and pass its `session_id` to `document_operation`.
+The bridge does not bind that session to a managed document ID or path.
 
-## Platforms
+The Linux automatic plugin path is
+`~/.local/share/onlyoffice/desktopeditors/sdkjs-plugins/<GUID>`. Other platforms
+require `-plugin-dir` and, where automatic editor detection is unavailable, a
+configured Desktop executable. Binaries were cross-built for Windows and
+macOS on amd64 and arm64. Interactive behaviour on those platforms and on
+ONLYOFFICE 7.x, 8.x and 10.x remains unverified. A follow-up Linux audit
+verified a saved spreadsheet cell edit, retention of numeric formatting and
+styles after the save, and a saved PowerPoint title edit in Desktop Editors.
+Only the spreadsheet formatting change was issued via MCP; the subsequent
+XLSX cell and PPTX title edits were made in the graphical editor.
 
-- **Linux: verified.** Full `go test ./...`, race detector, benchmark, and
-  the live bridge pairing path run on Linux.
-- **Windows / macOS: cross-compiled and `go vet` only.** CI builds all
-  three OSes and runs the short test suite there
-  (`.github/workflows/ci.yml`), but no interactive Desktop Editors session
-  was run on them here. The plugin installer only knows the Linux plugins
-  path (`~/.local/share/onlyoffice/desktopeditors/sdkjs-plugins/<GUID>`,
-  `internal/plugin/index.go:PluginDir`); on any other OS it returns an
-  error naming the `-plugin-dir` override instead of inventing a path, and
-  `server.New` (`internal/server/server.go`) logs a warning and serves
-  without the plugin.
-- The builder backend's process-group kill uses Unix-only `Setpgid`
-  (`internal/builder/builder.go`); a Windows port needs a build-tagged
-  alternative.
+## Other backends
 
-## Document Builder
-
-Optional backend (`internal/builder/builder.go`). `builder_version` was
-null in the recorded benchmark run: no builder binary was present here, so
-`builder_render` convert/render against a real binary is UNVERIFIED.
-
-## UNVERIFIED list
-
-- Live editor commands (`get_selected_text`, `replace_text`, full-content
-  round-trips) in an interactive Desktop Editors session.
-- Any specific MCP client app (Claude Desktop, OpenCode, Cursor, …).
-- ONLYOFFICE 8.x on this tree.
-- Windows / macOS interactive use (compile + vet only).
-- Real Document Builder CLI against `builder_render` (argv convention is
-  this repo's contract, not a verified server behavior).
-- Real office open of generated files (validator is structural; see
-  `docs/benchmark.md`).
-- Network/multi-user deployment (bridge binds loopback only; pairing
-  assumes a single-user machine — see `docs/threat-model.md`).
+Document Builder and ONLYOFFICE Document Server were unavailable for this
+integration test. Structural OOXML checks in `cmd/bench` cover synthetic
+fixtures and measure target-part preservation independently of the graphical
+session. Network and multi-user deployment are outside the verified loopback,
+single-user setup. See [threat model](threat-model.md).

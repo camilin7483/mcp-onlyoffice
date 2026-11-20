@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/cam/mcp-onlyoffice/internal/version"
@@ -52,6 +53,11 @@ func InstallPluginFiles() error {
 // InstallPluginFilesTo writes config.json + index.html into dir, creating
 // it when possible. Mkdir/write failures name the -plugin-dir override.
 func InstallPluginFilesTo(dir string) error {
+	return InstallPluginFilesForDesktop(dir, "", 0)
+}
+
+// InstallPluginFilesForDesktop uses the SDK shipped with the trusted editor.
+func InstallPluginFilesForDesktop(dir, editor string, port int) error {
 	if strings.TrimSpace(dir) == "" {
 		return fmt.Errorf("empty plugin dir: pass -plugin-dir <dir>")
 	}
@@ -63,7 +69,26 @@ func InstallPluginFilesTo(dir string) error {
 		return fmt.Errorf("write config.json in %s (override with -plugin-dir): %w", dir, err)
 	}
 
-	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte(pluginIndexHTML()), 0644); err != nil {
+	page := pluginIndexHTML()
+	if port > 0 && port <= 65535 {
+		page = strings.Replace(page, "PORT_START = 2021", "PORT_START = "+strconv.Itoa(port), 1)
+	}
+	if editor != "" {
+		if real, err := filepath.EvalSymlinks(editor); err == nil {
+			sdkDir := filepath.Dir(real)
+			if runtime.GOOS == "linux" && (real == "/usr/bin/desktopeditors" || real == "/usr/local/bin/desktopeditors") {
+				sdkDir = "/opt/onlyoffice/desktopeditors"
+			}
+			sdk := filepath.Join(sdkDir, "editors", "sdkjs-plugins", "v1", "plugins.js")
+			if data, err := os.ReadFile(sdk); err == nil {
+				if err := os.WriteFile(filepath.Join(dir, "plugins.js"), data, 0644); err != nil {
+					return fmt.Errorf("install editor SDK: %w", err)
+				}
+				page = strings.Replace(page, "../v1/plugins.js", "./plugins.js", 1)
+			}
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte(page), 0644); err != nil {
 		return fmt.Errorf("write index.html in %s (override with -plugin-dir): %w", dir, err)
 	}
 
@@ -111,10 +136,14 @@ func pluginIndexHTML() string {
 <html>
 <head>
 <meta charset="utf-8">
+<script src="../v1/plugins.js"></script>
 <script>
 let ws = null;
 let ready = false;
+let connecting = false;
+let reconnectTimer = null;
 let helloTimer = null;
+let activeCommand = null;
 let pluginApi = null; // captured at init; the host may clear the global afterwards
 let portOffset = 0;
 let backoffMs = 1000;
@@ -125,8 +154,8 @@ const PROTOCOL = 2;
 const CLIENT_VERSION = "` + pluginVersion + `";
 
 // Capability set the server enforces per method. Only the editor type that
-// actually implements a method advertises it: the full-content Office API
-// call inside callCommand exists only in word, so only word claims
+// actually implements a method advertises it: the paragraph reader
+// is implemented only for word, so only word claims
 // reader.full_content and the methods built on it.
 function capabilitiesFor(editorType) {
   switch (editorType) {
@@ -144,7 +173,8 @@ function capabilitiesFor(editorType) {
 
 function editorType() {
   try {
-    var t = Asc && Asc.plugin && Asc.plugin.info && Asc.plugin.info.editorType;
+    var api = pluginApi || Asc.plugin;
+    var t = api && api.info && api.info.editorType;
     if (t === "word" || t === "cell" || t === "slide" || t === "pdf") return t;
   } catch (e) {}
   return "unknown";
@@ -164,7 +194,7 @@ async function findServerPort() {
   for (let i = 0; i < PORT_SCAN_MAX; i++) {
     const port = PORT_START + ((portOffset + i) % PORT_SCAN_MAX);
     try {
-      const res = await fetch("http://127.0.0.1:" + port + "/ping");
+      const res = await fetch("http://127.0.0.1:" + port + "/ping", { signal: AbortSignal.timeout(500) });
       if (!res.ok) continue;
       const info = await res.json();
       if (info && info.app === "mcp-onlyoffice") {
@@ -179,11 +209,11 @@ async function findServerPort() {
 }
 
 async function pair(port) {
-  const chRes = await fetch("http://127.0.0.1:" + port + "/pair/challenge");
+  const chRes = await fetch("http://127.0.0.1:" + port + "/pair/challenge", { signal: AbortSignal.timeout(3000) });
   if (!chRes.ok) throw new Error("challenge rejected: HTTP " + chRes.status);
   const ch = await chRes.json();
   if (!ch || !ch.nonce) throw new Error("challenge returned no nonce");
-  const res = await fetch("http://127.0.0.1:" + port + "/pair?nonce=" + encodeURIComponent(ch.nonce));
+  const res = await fetch("http://127.0.0.1:" + port + "/pair?nonce=" + encodeURIComponent(ch.nonce), { signal: AbortSignal.timeout(3000) });
   if (!res.ok) throw new Error("pair rejected: HTTP " + res.status);
   return res.json();
 }
@@ -192,12 +222,28 @@ function scheduleReconnect() {
   ready = false;
   if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }
   if (ws) { ws.onclose = null; ws.onerror = null; try { ws.close(); } catch (e) {} ws = null; }
-  setTimeout(connect, backoffMs);
+  if (reconnectTimer !== null) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, backoffMs);
   backoffMs = Math.min(backoffMs * 2, BACKOFF_MAX_MS);
 }
 
 async function connect() {
-  if (ws && ws.readyState === WebSocket.OPEN) return;
+  if (ws || connecting || reconnectTimer !== null || !captureApi() || editorType() === "unknown") return;
+  connecting = true;
+  try {
+    await openConnection();
+  } catch (err) {
+    console.error("[MCP] connect failed:", err);
+    scheduleReconnect();
+  } finally {
+    connecting = false;
+  }
+}
+
+async function openConnection() {
   const port = await findServerPort();
   if (port === null) { scheduleReconnect(); return; }
   let info;
@@ -251,10 +297,17 @@ async function connect() {
       return;
     }
     if (msg && msg.type === "command") {
+      // El SDK comparte Asc.scope y callbacks entre comandos.
+      if (activeCommand !== null) {
+        sendResponse(msg.id, null, "editor is busy processing another command");
+        return;
+      }
+      activeCommand = { id: msg.id, socket: ws };
       try {
         handleCommand(msg);
       } catch (err) {
         console.error("[MCP] command error:", err);
+        sendResponse(msg.id, null, "editor command failed");
       }
     }
   };
@@ -269,6 +322,11 @@ async function connect() {
 }
 
 function sendResponse(id, result, error) {
+  let socket = ws;
+  if (activeCommand !== null && activeCommand.id === id) {
+    socket = activeCommand.socket;
+    activeCommand = null;
+  }
   let msg;
   if (error === undefined || error === null) {
     msg = { type: "response", id: id, ok: true, result: (result === undefined ? null : result) };
@@ -278,8 +336,8 @@ function sendResponse(id, result, error) {
     msg = { type: "response", id: id, ok: false,
       error: { code: error.code || "plugin_error", message: error.message || "plugin error" } };
   }
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(msg));
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(msg));
   }
 }
 
@@ -290,123 +348,95 @@ function handleCommand(msg) {
       sendResponse(id, "pong");
       break;
     case "get_selected_text":
-      execMethod("GetSelectedText", [], function(res) { sendResponse(id, res); });
+      execMethod(id, "GetSelectedText", [], function(res) { sendResponse(id, res); });
       break;
     case "get_all_content":
-      callCommandResult(function() { return Api.GetDocument().GetAllContent(); },
-        function(res) { sendResponse(id, res); });
+      runCommand(id, function() {
+        try {
+          var paragraphs = Api.GetDocument().GetAllParagraphs();
+          return paragraphs.map(function(paragraph) { return paragraph.GetText(); }).join("\n");
+        } catch (err) { return null; }
+      }, false, function(text) { sendResponse(id, text); });
       break;
     case "insert_text":
-      execMethod("PasteText", [params.text || ""], function() { sendResponse(id, "ok"); });
+      execMethod(id, "PasteText", [params.text || ""], function() { sendResponse(id, "ok"); });
       break;
     case "replace_text":
-      // Truthful find-and-replace via the SDK's SearchAndReplace method
-      // (verified at https://api.onlyoffice.com: executeMethod
-      // "SearchAndReplace" with {searchString, replaceString}). The SDK
-      // returns no match count, so count occurrences of the search string
-      // in the current content first and report that number. Never paste
-      // the whole document.
-      (function() {
-        var oldT = params.old || "";
-        var newT = params.new || "";
-        if (!oldT) { sendResponse(id, null, "old text is required"); return; }
-        callCommandResult(function() { return Api.GetDocument().GetAllContent(); }, function(content) {
-          var text = (content === null || content === undefined) ? "" : String(content);
-          var matches = text.split(oldT).length - 1;
-          execMethod("SearchAndReplace", [{ searchString: oldT, replaceString: newT }], function() {
-            callCommandResult(function() { return Api.GetDocument().GetAllContent(); }, function(after) {
-              var result = (after === null || after === undefined) ? "" : String(after);
-              sendResponse(id, { matches: matches, changed: matches > 0 && result.indexOf(newT) >= 0 });
-            });
-          });
-        });
-      })();
+      if (!params.old) { sendResponse(id, null, "old text is required"); return; }
+      Asc.scope = { oldText: params.old, newText: params.new || "" };
+      runCommand(id, function() {
+        try {
+          var doc = Api.GetDocument();
+          var count = doc.Search(Asc.scope.oldText, true).length;
+          if (count && !doc.SearchAndReplace({ searchString: Asc.scope.oldText,
+            replaceString: Asc.scope.newText, matchCase: true })) return null;
+          return count;
+        } catch (err) { return null; }
+      }, true, function(count) { sendResponse(id, { matches: count, changed: count > 0 }); });
       break;
     case "create_table":
-      callCommand(function(resolve) {
-        var doc = Api.GetDocument();
-        var table = Api.CreateTable(params.rows || 3, params.cols || 3);
-        doc.InsertContent([table]);
-        resolve();
-      }, function() { sendResponse(id, "ok"); });
+      Asc.scope = { rows: params.rows || 3, cols: params.cols || 3 };
+      runCommand(id, function() {
+        try {
+          var table = Api.CreateTable(Asc.scope.cols, Asc.scope.rows);
+          Api.GetDocument().InsertContent([table]);
+          return true;
+        } catch (err) { return null; }
+      }, true, function() { sendResponse(id, "ok"); });
       break;
     case "create_list":
-      var items = params.items || ["Item 1"];
-      var listType = params.type || "bullet";
-      callCommand(function(resolve) {
-        var doc = Api.GetDocument();
-        var list;
-        if (listType === "numbered") {
-          list = Api.CreateNumberedList("numbers");
-        } else {
-          list = Api.CreateBulletList("bullet");
-        }
-        for (var i = 0; i < items.length; i++) {
-          var para = Api.CreateParagraph();
-          para.AddText(items[i]);
-          list.AddParagraph(para);
-        }
-        doc.InsertContent([list]);
-        resolve();
-      }, function() { sendResponse(id, "ok"); });
+      Asc.scope = { items: params.items || ["Item 1"], listType: params.type || "bullet" };
+      runCommand(id, function() {
+        try {
+          var doc = Api.GetDocument();
+          var numbering = doc.CreateNumbering(Asc.scope.listType === "numbered" ? "numbered" : "bullet");
+          var level = numbering.GetLevel(0);
+          var paragraphs = Asc.scope.items.map(function(item) {
+            var paragraph = Api.CreateParagraph();
+            paragraph.SetNumbering(level);
+            paragraph.AddText(item);
+            return paragraph;
+          });
+          doc.InsertContent(paragraphs);
+          return true;
+        } catch (err) { return null; }
+      }, true, function() { sendResponse(id, "ok"); });
       break;
     case "set_bold":
-      execMethod("SetBold", [params.value !== false], function() { sendResponse(id, "ok"); });
+      execMethod(id, "SetBold", [params.value !== false], function() { sendResponse(id, "ok"); });
       break;
     case "set_italic":
-      execMethod("SetItalic", [params.value !== false], function() { sendResponse(id, "ok"); });
+      execMethod(id, "SetItalic", [params.value !== false], function() { sendResponse(id, "ok"); });
       break;
     case "get_document_info":
-      sendResponse(id, { editorType: "unknown" });
+      sendResponse(id, { editorType: editorType() });
       break;
     default:
       sendResponse(id, null, "unknown method: " + method);
   }
 }
 
-function execMethod(name, args, cb) {
-  var api = pluginApi || (typeof Asc !== "undefined" ? Asc.plugin : null);
-  if (!api || typeof api.executeMethod !== "function") {
-    console.error("[MCP] plugin API unavailable for " + name);
-    if (cb) cb(null);
-    return;
-  }
+function execMethod(id, name, args, cb) {
   try {
-    api.executeMethod(name, args, cb || function(){});
+    if (pluginApi.executeMethod(name, args, cb) === false) {
+      sendResponse(id, null, "editor rejected " + name);
+    }
   } catch (err) {
-    console.error("[MCP] executeMethod error:", err);
-    if (cb) cb(null);
+    sendResponse(id, null, "editor could not execute " + name);
   }
 }
 
-function callCommandResult(fn, cb) {
-  var api = pluginApi || (typeof Asc !== "undefined" ? Asc.plugin : null);
-  if (!api || typeof api.callCommand !== "function") {
-    console.error("[MCP] plugin API unavailable for callCommand");
-    if (cb) cb(null);
-    return;
-  }
+function runCommand(id, fn, recalculate, cb) {
   try {
-    api.callCommand("(" + fn.toString() + ")();", false, true, cb || function(){});
+    pluginApi.callCommand(fn, false, recalculate, function(result) {
+      if (result == null || (typeof result === "object" && result.onlyoffice_id_error_message)) {
+        sendResponse(id, null, "editor command failed");
+        return;
+      }
+      cb(result);
+    });
   } catch (err) {
-    console.error("[MCP] callCommand error:", err);
-    if (cb) cb(null);
-  }
-}
-
-function callCommand(fn, cb) {
-  var api = pluginApi || (typeof Asc !== "undefined" ? Asc.plugin : null);
-  if (!api || typeof api.callCommand !== "function") {
-    console.error("[MCP] plugin API unavailable for callCommand");
-    if (cb) cb();
-    return;
-  }
-  try {
-    var s = fn.toString();
-    api.callCommand("(" + s + ")(function(){});", false, true, cb || function(){});
-  } catch (err) {
-    console.error("[MCP] callCommand error:", err);
-    if (cb) cb();
+    sendResponse(id, null, "editor could not execute command");
   }
 }
 

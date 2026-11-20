@@ -73,9 +73,9 @@ class PDFEngine:
 
     def extract_text(self, path: str) -> dict:
         """Extract text content from a PDF."""
-        import PyPDF2
+        import pypdf
         with open(path, "rb") as f:
-            reader = PyPDF2.PdfReader(f)
+            reader = pypdf.PdfReader(f)
             pages = []
             for page_num in range(len(reader.pages)):
                 page = reader.pages[page_num]
@@ -87,8 +87,8 @@ class PDFEngine:
 
     def merge_pdfs(self, paths: list, output_path: str) -> dict:
         """Merge multiple PDFs into one."""
-        import PyPDF2
-        merger = PyPDF2.PdfMerger()
+        import pypdf
+        merger = pypdf.PdfWriter()
         for p in paths:
             merger.append(p)
         merger.write(output_path)
@@ -105,19 +105,19 @@ class PDFEngine:
             output_dir: destination dir (defaults to the source dir).
             pages: 1-based page numbers to extract (default: all).
         """
-        import PyPDF2
+        import pypdf
         out_dir = output_dir or os.path.dirname(path) or "."
         os.makedirs(out_dir, exist_ok=True)
         base = os.path.splitext(os.path.basename(path))[0]
         files = []
         with open(path, "rb") as f:
-            reader = PyPDF2.PdfReader(f)
+            reader = pypdf.PdfReader(f)
             total = len(reader.pages)
             wanted = pages or list(range(1, total + 1))
             for num in wanted:
                 if num < 1 or num > total:
                     continue
-                writer = PyPDF2.PdfWriter()
+                writer = pypdf.PdfWriter()
                 writer.add_page(reader.pages[num - 1])
                 out = os.path.join(out_dir, f"{base}_p{num}.pdf")
                 with open(out, "wb") as of:
@@ -128,9 +128,9 @@ class PDFEngine:
 
     def info(self, path: str) -> dict:
         """Return PDF metadata: page count, size, title, author."""
-        import PyPDF2
+        import pypdf
         with open(path, "rb") as f:
-            reader = PyPDF2.PdfReader(f)
+            reader = pypdf.PdfReader(f)
             meta = reader.metadata or {}
             info = {"path": path, "pages": len(reader.pages),
                     "size": os.path.getsize(path),

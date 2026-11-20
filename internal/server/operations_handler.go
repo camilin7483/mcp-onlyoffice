@@ -1,17 +1,18 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -194,102 +195,38 @@ func (h *ToolHandlers) handleDocumentOperation(ctx context.Context, args map[str
 	}
 	switch spec.Backend {
 	case operations.BackendOOXML:
-		return h.applyOOXMLOperation(op, spec, decision, approve, txID)
+		return h.applyOOXMLOperation(ctx, op, spec, decision, approve, txID)
 	case operations.BackendDesktop:
+		if op.ExpectedRevision != "" {
+			return textError("expected_revision is supported only for OOXML operations"), nil
+		}
 		return h.applyDesktopOperation(ctx, op, spec, decision, approve, txID)
 	default:
 		return textError(fmt.Sprintf("backend %s is not supported by document_operation", spec.Backend)), nil
 	}
 }
 
-// opPathLocks serialises concurrent document_operation calls on the same
-// file, so read -> revision check -> apply -> write is atomic per resolved
-// path. Entries are removed once idle so the map does not grow.
-var (
-	opPathMu    sync.Mutex
-	opPathLocks = make(map[string]*opPathEntry)
-)
-
-type opPathEntry struct {
-	mu   sync.Mutex
-	refs int
-}
-
-func acquireOpPathLock(path string) func() {
-	opPathMu.Lock()
-	e, ok := opPathLocks[path]
-	if !ok {
-		e = &opPathEntry{}
-		opPathLocks[path] = e
-	}
-	e.refs++
-	opPathMu.Unlock()
-	e.mu.Lock()
-	return func() {
-		e.mu.Unlock()
-		opPathMu.Lock()
-		defer opPathMu.Unlock()
-		e.refs--
-		if e.refs <= 0 {
-			delete(opPathLocks, path)
-		}
-	}
-}
-
-// writeAtomicFile swaps the new package bytes over the destination without
-// ever truncating it in place: temp file in the same directory, Sync,
-// Chmod to the original mode, Rename. The temp file is removed on every
-// error path. Tests override it to simulate a failed write.
-var writeAtomicFile = atomicWriteFile
-
-func atomicWriteFile(resolved string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(resolved), ".mcp-edit-*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	done := false
-	defer func() {
-		if !done {
-			_ = os.Remove(name)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(name, mode); err != nil {
-		return err
-	}
-	if err := os.Rename(name, resolved); err != nil {
-		return err
-	}
-	done = true
-	return nil
-}
+// El gancho permite simular un fallo de escritura en las pruebas.
+var writeAtomicFile = storage.ReplaceFile
 
 // applyOOXMLOperation edits one file in place, serialised per resolved path:
 // read -> revision check -> apply -> validate new bytes in memory (nothing
 // is written when invalid) -> approval gate -> dry-run receipt or backup +
 // atomic write -> receipt. The dry-run receipt carries the current on-disk
 // digest as revision, so chaining it as expected_revision succeeds.
-func (h *ToolHandlers) applyOOXMLOperation(op operations.Operation, spec operations.Spec, decision operations.Decision, approve bool, txID string) (*mcp.CallToolResult, error) {
+func (h *ToolHandlers) applyOOXMLOperation(ctx context.Context, op operations.Operation, spec operations.Spec, decision operations.Decision, approve bool, txID string) (*mcp.CallToolResult, error) {
 	path := op.Target.Path
 	if path == "" {
 		return textError("target.path is required for ooxml operations"), nil
 	}
-	resolved, err := storage.ResolveDest(path, h.effectiveRoots())
+	resolved, pathError := h.resolveDest(path)
+	if pathError != nil {
+		return pathError, nil
+	}
+	unlock, err := storage.LockDirectory(ctx, filepath.Dir(resolved))
 	if err != nil {
 		return textError(err.Error()), nil
 	}
-	unlock := acquireOpPathLock(resolved)
 	defer unlock()
 	info, err := os.Lstat(resolved)
 	if err != nil {
@@ -347,13 +284,41 @@ func (h *ToolHandlers) applyOOXMLOperation(op operations.Operation, spec operati
 	// Single backup of the original bytes (prepareWrite equivalent, kept
 	// local so the backup path is available for the audit entry).
 	bak := resolved + ".bak-" + storage.BackupTimestamp()
-	if err := writeBackup(resolved, bak); err != nil {
+	if err := writeBackupFrom(bytes.NewReader(data), bak); err != nil {
 		return textError("backup write: " + err.Error()), nil
 	}
 	if err := os.MkdirAll(filepath.Dir(resolved), 0o755); err != nil {
 		return textError("create directory: " + err.Error()), nil
 	}
-	if err := writeAtomicFile(resolved, newBytes, mode); err != nil {
+	if err := writeAtomicFile(resolved, newBytes, mode, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := storage.CheckDesktopWrite(resolved); err != nil {
+			return err
+		}
+		current, err := os.Lstat(resolved)
+		if err != nil {
+			return err
+		}
+		if !current.Mode().IsRegular() || !os.SameFile(info, current) || current.Size() != int64(len(data)) ||
+			current.Mode().Perm() != mode {
+			return fmt.Errorf("revision conflict: document changed while preparing the edit")
+		}
+		f, err := os.Open(resolved)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		latest, err := io.ReadAll(io.LimitReader(f, int64(len(data))+1))
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(latest, data) {
+			return fmt.Errorf("revision conflict: document changed while preparing the edit")
+		}
+		return nil
+	}); err != nil {
 		return textError("write file: " + err.Error()), nil
 	}
 	rc, err := tx.Commit(after)
@@ -361,7 +326,7 @@ func (h *ToolHandlers) applyOOXMLOperation(op operations.Operation, spec operati
 		return textError(err.Error()), nil
 	}
 	detail := map[string]any{"operation": op.Name, "before": before, "after": after, "backup": bak}
-	auditLog("document_operation", resolved, "ok", detail)
+	h.auditLog("document_operation", resolved, "ok", detail)
 	return receiptResult(opReceipt{
 		TransactionID: rc.TransactionID, Status: string(rc.Status), Operation: op.Name,
 		DocumentID: op.Target.DocumentID, BeforeDigest: rc.BeforeDigest,
@@ -530,6 +495,9 @@ func (h *ToolHandlers) applyDesktopOperation(ctx context.Context, op operations.
 	if h.bridge == nil || !h.bridge.IsConnected() {
 		return textError("plugin not connected. Use open_document first and make sure ONLYOFFICE Desktop Editors is running with the document open."), nil
 	}
+	if op.Target.DocumentID != "" || op.Target.Path != "" {
+		return textError("Desktop cannot verify document_id or path; select the editor session with session_id"), nil
+	}
 	if spec.Risk == operations.RiskDestructive && !approve {
 		return textError(fmt.Sprintf("operation %q requires approval (destructive); re-run with approve:true", op.Name)), nil
 	}
@@ -569,7 +537,7 @@ func (h *ToolHandlers) applyDesktopOperation(ctx context.Context, op operations.
 	var result any
 	var err error
 	if op.Target.SessionID != "" {
-		result, err = h.bridge.SendTo(op.Target.SessionID, method, params, 10*time.Second)
+		result, err = h.bridge.SendToContext(callCtx, op.Target.SessionID, method, params, 10*time.Second)
 	} else {
 		result, err = h.bridge.SendCommand(callCtx, method, params, 10*time.Second)
 	}
@@ -582,7 +550,7 @@ func (h *ToolHandlers) applyDesktopOperation(ctx context.Context, op operations.
 			}
 			r := desktopOpReceipt(rc.TransactionID, string(rc.Status), op.Name, op.Target.DocumentID, "", &operations.Diff{
 				Changes: []operations.Change{{Kind: "replace", Where: "open document"}},
-				Summary: op.Name + ": outcome unknown, retry or inspect the open document",
+				Summary: op.Name + ": outcome unknown, inspect the open document before retrying",
 			}, nil)
 			r.UnknownOutcome = true
 			return receiptResult(r)
@@ -624,6 +592,6 @@ func (h *ToolHandlers) applyDesktopOperation(ctx context.Context, op operations.
 	if rev != "" {
 		detail["revision"] = rev
 	}
-	auditLog("document_operation", target, "ok", detail)
+	h.auditLog("document_operation", target, "ok", detail)
 	return receiptResult(desktopOpReceipt(rc.TransactionID, string(rc.Status), op.Name, op.Target.DocumentID, rev, diff, matches))
 }

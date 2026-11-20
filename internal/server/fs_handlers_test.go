@@ -27,11 +27,9 @@ func testFS(t *testing.T) (*ToolHandlers, string) {
 	}
 	h := &ToolHandlers{store: s}
 
-	oldRoots, oldAudit := fsRoots, fsAudit
 	oldWrite, oldRead, oldWalk := fsMaxWrite, fsMaxRead, fsMaxWalk
 	oldZip, oldZipB, oldSrcs := fsMaxZip, fsMaxZipB, fsMaxSrcs
 	t.Cleanup(func() {
-		fsRoots, fsAudit = oldRoots, oldAudit
 		fsMaxWrite, fsMaxRead, fsMaxWalk = oldWrite, oldRead, oldWalk
 		fsMaxZip, fsMaxZipB, fsMaxSrcs = oldZip, oldZipB, oldSrcs
 	})
@@ -464,7 +462,7 @@ func TestEnsureWritableRefusesNonRegular(t *testing.T) {
 		t.Skipf("unix socket unavailable: %v", err)
 	}
 	defer l.Close()
-	_, errRes := ensureWritable(sock, "write_text", map[string]any{"overwrite": true})
+	_, errRes := (&ToolHandlers{}).ensureWritable(sock, "write_text", map[string]any{"overwrite": true})
 	if errRes == nil || !strings.Contains(resultText(t, errRes), "non-regular") {
 		t.Fatalf("expected non-regular refusal, got: %+v", errRes)
 	}
@@ -557,5 +555,36 @@ func TestFSWalkAndWriteLimits(t *testing.T) {
 	r, _ = h.handleWriteText(context.Background(), map[string]any{"path": filepath.Join(root, "big.txt"), "content": "12345"})
 	if !r.IsError || !strings.Contains(resultText(t, r), "over the 4 byte limit") {
 		t.Errorf("write limit not enforced: %s", resultText(t, r))
+	}
+}
+
+func TestCreateZipSourceFailurePreservesExistingDestination(t *testing.T) {
+	h, root := testFS(t)
+	dest := filepath.Join(root, "report.zip")
+	if err := os.WriteFile(dest, []byte("existing output"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := h.handleCreateZip(context.Background(), map[string]any{
+		"path": dest, "sources": []any{filepath.Join(root, "missing.txt")}, "overwrite": true,
+	})
+	if err != nil || !out.IsError {
+		t.Fatalf("create ZIP = %+v, %v", out, err)
+	}
+	if data, err := os.ReadFile(dest); err != nil || string(data) != "existing output" {
+		t.Fatalf("destination = %q, %v", data, err)
+	}
+}
+
+func TestZipParentConflictIsRefusedBeforeExtraction(t *testing.T) {
+	h, dir := testFS(t)
+	path := filepath.Join(dir, "archive.zip")
+	writeTestZip(t, path, map[string]string{"note.txt": "note", "report": "plain file", "report/content.txt": "child"}, nil)
+	dest := filepath.Join(dir, "output")
+	result, err := h.handleExtractZip(context.Background(), map[string]any{"path": path, "dest": dest})
+	if err != nil || !result.IsError || !strings.Contains(resultText(t, result), "conflicts with parent") {
+		t.Fatalf("conflicting archive result = %+v, %v", result, err)
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("destination exists after preflight failure: %v", err)
 	}
 }

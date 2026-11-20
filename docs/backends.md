@@ -71,3 +71,18 @@ disabled. `builder.Detect` otherwise looks up only the
 UNVERIFIED: whether any real Document Builder CLI accepts this positional
 argv, which is why the real CLIs are not auto-detected by name; no builder
 run was recorded here (see `docs/compatibility.md`).
+
+
+### XLSX values and concurrent edits
+
+`ooxml.xlsx.set_cell` clones the target cell's existing format when applying
+`number_format`. Plain values stay text by default. When a number format is
+requested, decimal and scientific notation values with no leading zero padding
+are stored as numbers if representable within Excel’s 15 significant digits.
+Other strings, such as `0012`, are preserved as text.
+
+MCP instances sharing a storage directory coordinate filesystem mutations through
+a lock. Typed OOXML changes also lock the target directory, reject Desktop
+Editors' open-for-edit marker, and recheck the source bytes immediately before
+replacing it. External tools must coordinate writes or edit a separate copy.
+An unrelated process can still write without honoring either lock.

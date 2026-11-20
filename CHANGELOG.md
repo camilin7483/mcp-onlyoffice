@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve cell styles when applying XLSX number formats.
+- Coordinate concurrent document writes and preserve the original on revision conflicts.
+- Open managed documents in ONLYOFFICE Desktop and refuse ambiguous editor commands.
+- Validate archive and mail-merge destinations before writing and update the PDF dependencies.
+
 ## [2.2.0] — 2026-11-19
 
 ### Added

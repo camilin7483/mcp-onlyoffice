@@ -461,7 +461,7 @@ func tagAttr(tag, attr string) string {
 var (
 	sheetTagRe      = regexp.MustCompile(`<sheet\b[^>]*>`)
 	relTagRe        = regexp.MustCompile(`<Relationship\b[^>]*>`)
-	rowRe           = regexp.MustCompile(`(?s)<row\b[^>]*>.*?</row>`)
+	rowRe           = regexp.MustCompile(`(?s)<row\b[^>]*/>|<row\b[^>]*>.*?</row>`)
 	rowOpenRe       = regexp.MustCompile(`<row\b[^>]*>`)
 	cellTagRe       = regexp.MustCompile(`(?s)<c\b[^>]*/>|<c\b[^>]*>.*?</c>`)
 	sheetDataSelfRe = regexp.MustCompile(`<sheetData\b[^>]*/>`)
@@ -576,27 +576,44 @@ func SetCellValue(src []byte, sheet, cell, value string, formula bool, numberFor
 		return nil, fmt.Errorf("ooxml: malformed %s: %w", part, err)
 	}
 	changed := map[string][]byte{}
-	newStyleAttr := ""
-	if numberFormat != "" {
+	cellStyle := func(base string) (string, error) {
+		if numberFormat == "" {
+			if base == "" {
+				return "", nil
+			}
+			return ` s="` + xmlEscape(base) + `"`, nil
+		}
+		index := 0
+		if base != "" {
+			var err error
+			index, err = strconv.Atoi(base)
+			if err != nil || index < 0 {
+				return "", fmt.Errorf("ooxml: invalid cell style %q", base)
+			}
+		}
 		styles, err := findPart(entries, "xl/styles.xml")
 		if err != nil {
-			return nil, err
+			return "", err
 		}
-		xf, newStyles, err := ensureNumberFormat(styles, numberFormat)
+		xf, updated, err := ensureNumberFormat(styles, numberFormat, index)
 		if err != nil {
-			return nil, err
+			return "", err
 		}
-		if newStyles != "" {
-			changed["xl/styles.xml"] = []byte(newStyles)
+		if updated != "" {
+			changed["xl/styles.xml"] = []byte(updated)
 		}
-		newStyleAttr = ` s="` + strconv.Itoa(xf) + `"`
+		return ` s="` + strconv.Itoa(xf) + `"`, nil
 	}
 	buildCell := func(extraAttrs string) string {
 		if formula {
 			f := strings.TrimPrefix(value, "=")
 			return `<c r="` + ref + `"` + extraAttrs + `><f>` + xmlEscape(f) + `</f></c>`
 		}
-		return `<c r="` + ref + `" t="str"` + extraAttrs + `><v>` + xmlEscape(value) + `</v></c>`
+		cellType := ` t="str"`
+		if numberFormat != "" && isNumericCellValue(value) {
+			cellType = ` t="n"`
+		}
+		return `<c r="` + ref + `"` + cellType + extraAttrs + `><v>` + xmlEscape(value) + `</v></c>`
 	}
 	s := string(sheetXML)
 	rowLocs := rowRe.FindAllStringIndex(s, -1)
@@ -610,6 +627,9 @@ func SetCellValue(src []byte, sheet, cell, value string, formula bool, numberFor
 	if rowIdx >= 0 {
 		loc := rowLocs[rowIdx]
 		row := s[loc[0]:loc[1]]
+		if strings.HasSuffix(row, "/>") && !strings.HasSuffix(row, "</row>") {
+			row = strings.TrimSuffix(row, "/>") + "></row>"
+		}
 		cellLocs := cellTagRe.FindAllStringIndex(row, -1)
 		hit := -1
 		for i := range cellLocs {
@@ -629,11 +649,9 @@ func SetCellValue(src []byte, sheet, cell, value string, formula bool, numberFor
 			cl := cellLocs[hit]
 			endRel := strings.Index(row[cl[0]:], ">")
 			open := row[cl[0] : cl[0]+endRel+1]
-			attrs := ""
-			if newStyleAttr != "" {
-				attrs = newStyleAttr
-			} else if v := tagAttr(open, "s"); v != "" {
-				attrs = ` s="` + v + `"`
+			attrs, err := cellStyle(tagAttr(open, "s"))
+			if err != nil {
+				return nil, err
 			}
 			if v := tagAttr(open, "cm"); v != "" {
 				attrs += ` cm="` + v + `"`
@@ -644,7 +662,11 @@ func SetCellValue(src []byte, sheet, cell, value string, formula bool, numberFor
 			newCell = buildCell(attrs)
 			row = row[:cl[0]] + newCell + row[cl[1]:]
 		} else {
-			newCell = buildCell(newStyleAttr)
+			attrs, err := cellStyle("")
+			if err != nil {
+				return nil, err
+			}
+			newCell = buildCell(attrs)
 			newCol := cn
 			pos := -1
 			for _, cl := range cellLocs {
@@ -675,7 +697,11 @@ func SetCellValue(src []byte, sheet, cell, value string, formula bool, numberFor
 		}
 		s = s[:loc[0]] + row + s[loc[1]:]
 	} else {
-		newCell := buildCell(newStyleAttr)
+		attrs, err := cellStyle("")
+		if err != nil {
+			return nil, err
+		}
+		newCell := buildCell(attrs)
 		newRow := `<row r="` + rowNum + `">` + newCell + `</row>`
 		if closeIdx := strings.LastIndex(s, "</sheetData>"); closeIdx >= 0 {
 			newRowNum, _ := strconv.Atoi(rowNum)
@@ -733,7 +759,8 @@ var (
 	cellXfsRe        = regexp.MustCompile(`(?s)<cellXfs\b[^>]*>.*?</cellXfs>`)
 	cellXfsSelfRe    = regexp.MustCompile(`<cellXfs\b[^>]*/>`)
 	cellXfsOpenRe    = regexp.MustCompile(`<cellXfs\b[^>]*>`)
-	xfOpenRe         = regexp.MustCompile(`<xf\b[^>]*>`)
+	decimalCellValue = regexp.MustCompile(`^[+-]?(?:(?:0|[1-9][0-9]*)(?:\.[0-9]*)?|\.[0-9]+)(?:[Ee][+-]?[0-9]+)?$`)
+	xfNumberAttrs    = regexp.MustCompile(`\s+(?:numFmtId|applyNumberFormat)\s*=\s*(?:"[^"]*"|'[^']*')`)
 	countRe          = regexp.MustCompile(`count="(\d+)"`)
 	styleSheetOpenRe = regexp.MustCompile(`<styleSheet\b[^>]*>`)
 )
@@ -756,9 +783,23 @@ func bumpCount(block, openPat string, n int, openRe *regexp.Regexp) string {
 	})
 }
 
+// isNumericCellValue conserva como texto los valores que Excel redondearía.
+func isNumericCellValue(value string) bool {
+	if !decimalCellValue.MatchString(value) {
+		return false
+	}
+	mantissa, _, _ := strings.Cut(strings.ToLower(value), "e")
+	mantissa = strings.TrimLeft(strings.ReplaceAll(mantissa, ".", ""), "+-0")
+	if len(strings.TrimRight(mantissa, "0")) > 15 {
+		return false
+	}
+	number, err := strconv.ParseFloat(value, 64)
+	return err == nil && (number != 0 || mantissa == "")
+}
+
 // ensureNumberFormat returns the cellXfs index for formatCode, extending
 // styles.xml when needed. newStyles is "" when nothing changed.
-func ensureNumberFormat(styles []byte, formatCode string) (int, string, error) {
+func ensureNumberFormat(styles []byte, formatCode string, baseStyle int) (int, string, error) {
 	if err := wellFormed(styles); err != nil {
 		return 0, "", fmt.Errorf("ooxml: malformed xl/styles.xml: %w", err)
 	}
@@ -770,7 +811,7 @@ func ensureNumberFormat(styles []byte, formatCode string) (int, string, error) {
 		if id > maxID {
 			maxID = id
 		}
-		if tagAttr(tag, "formatCode") == formatCode {
+		if tagAttr(tag, "formatCode") == xmlEscape(formatCode) {
 			idFor = id
 		}
 	}
@@ -796,9 +837,25 @@ func ensureNumberFormat(styles []byte, formatCode string) (int, string, error) {
 	}
 	if loc := cellXfsRe.FindStringIndex(s); loc != nil {
 		block := s[loc[0]:loc[1]]
-		xfs := xfOpenRe.FindAllString(block, -1)
-		for i, tag := range xfs {
-			if id, _ := strconv.Atoi(tagAttr(tag, "numFmtId")); id == idFor {
+		xfs, err := cellFormats(block)
+		if err != nil {
+			return 0, "", err
+		}
+		if baseStyle >= len(xfs) {
+			return 0, "", fmt.Errorf("ooxml: cell style %d is missing", baseStyle)
+		}
+		tag := xfs[baseStyle]
+		openEnd := strings.IndexByte(tag, '>')
+		open := xfNumberAttrs.ReplaceAllString(tag[:openEnd], "")
+		slash := ""
+		if strings.HasSuffix(open, "/") {
+			open = strings.TrimSuffix(open, "/")
+			slash = "/"
+		}
+		tag = strings.TrimRight(open, " \t\n\r") + ` numFmtId="` + strconv.Itoa(idFor) +
+			`" applyNumberFormat="1"` + slash + tag[openEnd:]
+		for i, xf := range xfs {
+			if xf == tag {
 				if !changed {
 					return i, "", nil
 				}
@@ -806,7 +863,6 @@ func ensureNumberFormat(styles []byte, formatCode string) (int, string, error) {
 			}
 		}
 		idx := len(xfs)
-		tag := `<xf numFmtId="` + strconv.Itoa(idFor) + `" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>`
 		block = bumpCount(block, "cellXfs", idx+1, cellXfsOpenRe)
 		block = strings.Replace(block, "</cellXfs>", tag+"</cellXfs>", 1)
 		s = s[:loc[0]] + block + s[loc[1]:]
@@ -815,7 +871,7 @@ func ensureNumberFormat(styles []byte, formatCode string) (int, string, error) {
 		}
 		return idx, s, nil
 	}
-	if loc := cellXfsSelfRe.FindStringIndex(s); loc != nil {
+	if loc := cellXfsSelfRe.FindStringIndex(s); loc != nil && baseStyle == 0 {
 		tag := `<xf numFmtId="` + strconv.Itoa(idFor) + `" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>`
 		s = s[:loc[0]] + `<cellXfs count="1">` + tag + `</cellXfs>` + s[loc[1]:]
 		if err := wellFormed([]byte(s)); err != nil {
@@ -824,4 +880,31 @@ func ensureNumberFormat(styles []byte, formatCode string) (int, string, error) {
 		return 0, s, nil
 	}
 	return 0, "", fmt.Errorf("ooxml: xl/styles.xml has no <cellXfs>")
+}
+
+// cellFormats conserva el XML original de cada formato, incluidos sus hijos y extensiones.
+func cellFormats(block string) ([]string, error) {
+	decoder := xml.NewDecoder(strings.NewReader(block))
+	if _, err := decoder.Token(); err != nil {
+		return nil, err
+	}
+	var formats []string
+	for {
+		offset := decoder.InputOffset()
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		switch elem := token.(type) {
+		case xml.EndElement:
+			return formats, nil
+		case xml.StartElement:
+			if err := decoder.Skip(); err != nil {
+				return nil, err
+			}
+			if elem.Name.Local == "xf" {
+				formats = append(formats, block[offset:decoder.InputOffset()])
+			}
+		}
+	}
 }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/cam/mcp-onlyoffice/internal/agent"
 	"github.com/cam/mcp-onlyoffice/internal/analyzer"
+	auditlog "github.com/cam/mcp-onlyoffice/internal/audit"
 	"github.com/cam/mcp-onlyoffice/internal/builder"
 	"github.com/cam/mcp-onlyoffice/internal/engine"
 	"github.com/cam/mcp-onlyoffice/internal/operations"
@@ -20,6 +21,8 @@ import (
 )
 
 type ToolHandlers struct {
+	fsRoots     []string
+	fsAudit     *auditlog.Logger
 	store       *storage.LocalStore
 	desktopPath string
 	bridge      *plugin.Bridge
@@ -177,10 +180,10 @@ func (h *ToolHandlers) Definitions() []toolDef {
 }
 
 func (h *ToolHandlers) openInEditor(id, mode string) error {
-	if _, err := h.store.Get(id); err != nil {
+	dataPath, err := h.store.DesktopPath(id)
+	if err != nil {
 		return err
 	}
-	dataPath := h.store.DataPath(id)
 	var cmd *exec.Cmd
 	switch mode {
 	case "view":
@@ -204,8 +207,8 @@ func sanitizeFilename(name string) string {
 		}
 		return r
 	}, name)
-	if len(name) > 100 {
-		name = string([]rune(name)[:100])
+	if chars := []rune(name); len(chars) > 100 {
+		name = string(chars[:100])
 	}
 	return strings.TrimSpace(name)
 }

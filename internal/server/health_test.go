@@ -41,8 +41,6 @@ func healthFixture(t *testing.T, pyBridge *engine.Bridge) (*ToolHandlers, string
 	pb := plugin.NewBridge(0)
 	h := NewToolHandlers(s, "", pb, pyBridge, NewSessionCache(), NewToolRegistry())
 
-	oldRoots := fsRoots
-	t.Cleanup(func() { fsRoots = oldRoots })
 	h.SetAllowedRoots(dir)
 	return h, pb.Token()
 }

@@ -18,7 +18,7 @@ The server uses stdio for MCP and a loopback WebSocket for the Desktop Editors p
 - **Tool profiles.** The default `legacy` profile registers 74 tools. The `professional` profile registers 20 focused document tools. Both publish MCP tool annotations. See the [profile reference](docs/TOOL_PROFILES.md).
 - **Degraded startup.** Storage is the only fatal dependency. A missing editor or Python engine no longer stops the server; the `health` tool reports `core_ready`, `python_available`, `desktop_available`, `builder_available` and `document_server_available`, and the affected tools return a clear error.
 - **Reports.** DOCX sections accept images. Report output names are sanitized and replacing an existing output requires `overwrite: true`.
-- **Desktop pairing.** The plugin installs into the editor's GUID directory (override with `-plugin-dir`, `plugin_dir` config, or `MCP_ONLYOFFICE_PLUGIN_DIR`), discovers the loopback bridge, and reconnects automatically. Bridge pairing is covered by automated tests; editor commands still need interactive verification (see [compatibility](docs/compatibility.md)).
+- **Desktop pairing.** The plugin installs into the editor's GUID directory (override with `-plugin-dir`, `plugin_dir` config, or `MCP_ONLYOFFICE_PLUGIN_DIR`), discovers the loopback bridge, and reconnects automatically. The Linux audit exercised pairing and a DOCX editing and save round-trip in Desktop Editors. See [compatibility](docs/compatibility.md) for the tested version and remaining gaps.
 - **Local file handling.** Filesystem paths are checked against configured roots, replacements use explicit overwrite flags and backups, and recursive deletion requires opt-in. ZIP processing enforces entry and size limits, and `delete_file` calls, overwrite backups, `append_text` calls, and skipped-symlink listings are recorded in a JSONL audit trail.
 - **Python recovery.** Requests have correlated IDs, a size limit, and a 120-second timeout. A timed-out or canceled worker stops and restarts on demand. The caller receives an unknown-outcome error for the interrupted operation.
 
@@ -81,7 +81,7 @@ The server uses stdio for MCP and a loopback WebSocket for the Desktop Editors p
 │  ├── documents/   (python-docx)  │                     │
 │  ├── presentations/ (pptx)       │                     │
 │  ├── analytics/   (statistics)   │                     │
-│  ├── pdf/         (fpdf2/PyPDF2) │                     │
+│  ├── pdf/         (fpdf2/pypdf) │                     │
 │  └── images/      (Pillow)       │                     │
 └──────────────────────────────────┘                     │
                                                          │
@@ -93,7 +93,7 @@ The server uses stdio for MCP and a loopback WebSocket for the Desktop Editors p
 ┌─────────────────────────────────────────────────────┐  │
 │  Document Storage (local filesystem)                 │  │
 │  ~/mcp-onlyoffice/documents/ (default)               │  │
-│  └── UUID.data + .metadata.json                     │  │
+│  └── UUID payload + .metadata.json                     │  │
 └─────────────────────────────────────────────────────┘  │
 ```
 

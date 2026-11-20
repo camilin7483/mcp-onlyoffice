@@ -17,6 +17,9 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 import datetime
 import os
+import string
+
+from python_engine.validator import is_within_dir
 
 CORPORATE_BLUE_DARK = "1F4E79"
 CORPORATE_BLUE = "2E75B6"
@@ -397,9 +400,29 @@ class DocumentEngine:
                 records.extend(list(_csv.DictReader(f)))
         if not records:
             return {"status": "error", "error": "No merge data: provide data_csv or rows"}
+        fields = list(string.Formatter().parse(output_pattern))
+        if any(field is not None and (not field.isidentifier() or spec or conversion)
+               for _, field, spec, conversion in fields):
+            raise ValueError("output_pattern accepts only plain field placeholders")
+        outputs = []
+        used = set()
+        output_root = os.path.realpath(output_dir)
+        for i, record in enumerate(records, start=1):
+            values = {k: str(v) for k, v in record.items()}
+            values["index"] = i
+            name = output_pattern.format_map(values)
+            if not name or name in (".", "..") or any(c in name for c in "/\\:\x00"):
+                raise ValueError("mail merge output must be a filename")
+            out = os.path.join(output_root, name)
+            key = os.path.normcase(out)
+            if not is_within_dir(out, output_root) or os.path.lexists(out) or key in used:
+                raise ValueError("mail merge output already exists or escapes its directory")
+            outputs.append(out)
+            used.add(key)
+
         os.makedirs(output_dir, exist_ok=True)
         files = []
-        for i, record in enumerate(records, start=1):
+        for record, out in zip(records, outputs):
             doc = Document(template_path)
             for para in doc.paragraphs:
                 self._merge_paragraph(para, record)
@@ -413,9 +436,8 @@ class DocumentEngine:
                     self._merge_paragraph(para, record)
                 for para in section.footer.paragraphs:
                     self._merge_paragraph(para, record)
-            name = output_pattern.format(index=i, **{k: str(v) for k, v in record.items()})
-            out = os.path.join(output_dir, name)
-            doc.save(out)
+            with open(out, "xb") as output:
+                doc.save(output)
             files.append(out)
         return {"template": template_path, "count": len(files), "files": files}
 
