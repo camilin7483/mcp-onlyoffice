@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -32,6 +33,9 @@ echo ok > "$last"
 }
 
 func TestBuilderRenderConvertMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test fixture is a POSIX shell script")
+	}
 	h, dir := builderHandlerFixture(t)
 	in := filepath.Join(dir, "in.txt")
 	if err := os.WriteFile(in, []byte("x"), 0o644); err != nil {
@@ -76,6 +80,10 @@ func TestBuilderRenderModeRequiresFormat(t *testing.T) {
 	}
 	if !r.IsError || !strings.Contains(resultText(t, r), "format is required") {
 		t.Errorf("want a format-required tool error, got: %s", resultText(t, r))
+	}
+
+	if runtime.GOOS == "windows" {
+		return
 	}
 
 	r, err = h.handleBuilderRender(context.Background(), map[string]any{
@@ -132,6 +140,10 @@ func TestBuilderRenderOverwriteGuard(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(out); string(data) != "original" {
 		t.Fatalf("output changed despite refusal: %q", data)
+	}
+
+	if runtime.GOOS == "windows" {
+		return
 	}
 
 	// With overwrite:true the call succeeds and keeps a .bak- backup.

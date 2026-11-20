@@ -3,6 +3,7 @@ package audit
 import (
 	"encoding/json"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -32,6 +33,9 @@ func TestAuditWritesJSONL(t *testing.T) {
 }
 
 func TestAuditFileMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows uses ACLs instead of POSIX permission bits")
+	}
 	dir := t.TempDir()
 	l, err := New(dir)
 	if err != nil {
